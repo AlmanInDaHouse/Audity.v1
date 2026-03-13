@@ -5,6 +5,7 @@ from collections import defaultdict
 from collections.abc import Awaitable, Callable
 
 from fastapi import HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 
 from app.config import get_settings
@@ -55,7 +56,11 @@ rate_limiter = RateLimiter()
 async def rate_limit_middleware(request: Request, call_next: Callable[[Request], Awaitable]):
     if request.url.path not in {'/health', '/docs', '/openapi.json'}:
         client_ip = request.client.host if request.client else 'unknown'
-        await rate_limiter.check(f'{client_ip}:global', rate_limiter.settings.rate_limit_per_minute)
+        try:
+            await rate_limiter.check(f'{client_ip}:global', rate_limiter.settings.rate_limit_per_minute)
+        except HTTPException as exc:
+            RATE_LIMIT_HITS.labels(request.url.path).inc()
+            return JSONResponse(status_code=exc.status_code, content={'detail': exc.detail})
     return await call_next(request)
 
 

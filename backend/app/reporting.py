@@ -23,6 +23,5 @@ def render_report_html(context: dict[str, Any]) -> str:
 
 def render_report_pdf(html: str) -> bytes:
     if HTML is None:
-        # why this: keep tests deterministic even if native PDF deps are unavailable outside containers.
-        return b'%PDF-1.4\n%fallback\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF'
+        raise RuntimeError('WeasyPrint runtime is unavailable. Install production PDF dependencies before generating reports.')
     return HTML(string=html).write_pdf()

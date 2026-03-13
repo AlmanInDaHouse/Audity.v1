@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from app import main as main_module
 from app.db import SessionLocal
 from app.models import Integration
+from app.package_export import HTML
 from app.temporal_workflow import AuditRunWorkflowInput
 from app.workflow_runtime import AuditWorkflowInput, execute_inline
 
@@ -166,6 +169,9 @@ def test_upload_quarantine_and_signature_verification(client, seeded_ids, monkey
 
 
 def test_export_auditor_package_contains_artifacts(client, seeded_ids, monkeypatch):
+    if HTML is None:
+        pytest.skip('WeasyPrint runtime unavailable in local interpreter')
+
     async def _launch_inline(payload: AuditRunWorkflowInput) -> None:
         await execute_inline(AuditWorkflowInput(**payload.__dict__))
 
@@ -194,3 +200,23 @@ def test_export_auditor_package_contains_artifacts(client, seeded_ids, monkeypat
     download = client.get(f'/evidence/{package_evidence_id}/download', headers=headers)
     assert download.status_code == 200
     assert download.headers.get('content-type', '').startswith('application/zip')
+
+
+def test_onboarding_completion_requires_signed_dpa(client, seeded_ids):
+    admin = _login(client, seeded_ids['users']['admin'], seeded_ids['org_id'])['access_token']
+    headers = {'Authorization': f'Bearer {admin}'}
+
+    blocked = client.post(f"/organizations/{seeded_ids['org_id']}/legal/onboarding/complete", headers=headers)
+    assert blocked.status_code == 409
+
+    updated = client.put(
+        f"/organizations/{seeded_ids['org_id']}/legal/dpa",
+        json={'status': 'signed', 'reference': 'DPA-2026-001'},
+        headers=headers,
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()['dpa_status'] == 'signed'
+
+    completed = client.post(f"/organizations/{seeded_ids['org_id']}/legal/onboarding/complete", headers=headers)
+    assert completed.status_code == 200, completed.text
+    assert completed.json()['onboarding_status'] == 'completed'

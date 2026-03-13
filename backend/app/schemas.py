@@ -9,6 +9,22 @@ class LoginRequest(BaseModel):
     mfa: bool = False
 
 
+class ChatMessage(BaseModel):
+    role: str = Field(pattern='^(user|assistant)$')
+    content: str = Field(min_length=1, max_length=4000)
+
+
+class DashboardAssistantChatRequest(BaseModel):
+    messages: list[ChatMessage] = Field(min_length=1, max_length=12)
+
+
+class DashboardAssistantChatResponse(BaseModel):
+    reply: str
+    provider: str
+    model: str
+    generated_at: str
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = 'bearer'

@@ -40,7 +40,10 @@ async def org_context() -> dict[str, Any]:
     viewer_a_email = f'it.viewer.{suffix}@test.local'
     admin_b_email = f'it.adminb.{suffix}@test.local'
 
-    conn = await asyncpg.connect(_pg_dsn())
+    try:
+        conn = await asyncpg.connect(_pg_dsn())
+    except OSError as exc:
+        pytest.skip(f'Integration database is unavailable: {exc}')
     try:
         await conn.execute('INSERT INTO organizations (id, name, created_at) VALUES ($1, $2, now())', org_a_id, f'IT Org A {suffix}')
         await conn.execute('INSERT INTO organizations (id, name, created_at) VALUES ($1, $2, now())', org_b_id, f'IT Org B {suffix}')

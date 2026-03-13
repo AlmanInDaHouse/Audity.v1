@@ -41,6 +41,7 @@ class AuditStatusEnum(str, enum.Enum):
 
 class FindingStatusEnum(str, enum.Enum):
     open = 'open'
+    pending_validation = 'pending_validation'
     accepted = 'accepted'
     resolved = 'resolved'
 
@@ -62,6 +63,11 @@ class Organization(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
     name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    dpa_status: Mapped[str] = mapped_column(String(32), default='pending')
+    dpa_signed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    dpa_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    onboarding_status: Mapped[str] = mapped_column(String(32), default='pending')
+    onboarding_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -224,6 +230,18 @@ class AuthSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class SecretRecord(Base):
+    __tablename__ = 'secret_records'
+    __table_args__ = (UniqueConstraint('org_id', 'name', name='uq_secret_records_org_name'),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    org_id: Mapped[str] = mapped_column(String(36), ForeignKey('organizations.id', ondelete='CASCADE'), index=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class OrgSecurityPolicy(Base):
     __tablename__ = 'org_security_policies'
 
@@ -332,6 +350,25 @@ class AuditPackage(Base):
     status: Mapped[str] = mapped_column(String(32), default='ready')
     created_by_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ExternalTicket(Base):
+    __tablename__ = 'external_tickets'
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    org_id: Mapped[str] = mapped_column(String(36), ForeignKey('organizations.id', ondelete='CASCADE'), index=True)
+    finding_id: Mapped[str] = mapped_column(String(36), ForeignKey('findings.id', ondelete='CASCADE'), index=True)
+    outbound_integration_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey('outbound_integrations.id', ondelete='CASCADE'), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    external_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    external_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    external_status: Mapped[str] = mapped_column(String(64), default='open')
+    sync_state: Mapped[str] = mapped_column(String(32), default='linked')
+    last_payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class AuditLogEntry(Base):

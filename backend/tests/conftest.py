@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -9,11 +11,16 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 # why this: tests force deterministic local mode and avoid external dependency flakiness.
-os.environ.setdefault('APP_ENV', 'test')
+os.environ.setdefault('APP_ENV', 'dev')
 os.environ.setdefault('WORKFLOW_MODE', 'inline')
 os.environ.setdefault('STORAGE_BACKEND', 'memory')
 os.environ.setdefault('AUTO_CREATE_SCHEMA', 'false')
-os.environ['DATABASE_URL'] = 'sqlite+aiosqlite:////tmp/audity_test.db'
+os.environ.setdefault('SECRET_STORE_BACKEND', 'db')
+os.environ.setdefault('SECRET_ENCRYPTION_KEY', 'test-secret-encryption-key')
+os.environ.setdefault('OIDC_PRIVATE_KEY_PATH', os.path.join(tempfile.gettempdir(), 'audity_test_oidc.pem'))
+os.environ.setdefault('CATALOG_DIR', str(Path(__file__).resolve().parents[2] / 'catalogs'))
+TEST_DB_PATH = os.path.join(tempfile.gettempdir(), 'audity_test.db').replace('\\', '/')
+os.environ['DATABASE_URL'] = f'sqlite+aiosqlite:///{TEST_DB_PATH}'
 
 from app.db import Base, SessionLocal, engine
 from app.main import app
@@ -36,6 +43,7 @@ def clean_db() -> None:
         async with SessionLocal() as db:
             tables = [
                 'audit_packages',
+                'external_tickets',
                 'pricing_plans',
                 'outbound_integrations',
                 'remediation_comments',
@@ -45,6 +53,7 @@ def clean_db() -> None:
                 'scim_access_tokens',
                 'org_security_policies',
                 'auth_sessions',
+                'secret_records',
                 'audit_log_entries',
                 'remediation_tasks',
                 'findings',

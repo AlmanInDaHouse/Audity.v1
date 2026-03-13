@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
 from app import main as main_module
+from app.package_export import HTML
 from app.temporal_workflow import AuditRunWorkflowInput
 from app.workflow_runtime import AuditWorkflowInput, execute_inline
 
@@ -12,6 +15,9 @@ def _login(client, email, org_id):
 
 
 def test_create_audit_run_happy_path(client, seeded_ids, monkeypatch):
+    if HTML is None:
+        pytest.skip('WeasyPrint runtime unavailable in local interpreter')
+
     async def _launch_inline(payload: AuditRunWorkflowInput) -> None:
         await execute_inline(AuditWorkflowInput(**payload.__dict__))
 
@@ -19,7 +25,7 @@ def test_create_audit_run_happy_path(client, seeded_ids, monkeypatch):
 
     token = _login(client, seeded_ids['users']['auditor'], seeded_ids['org_id'])
 
-    # Create two integrations used by workflow (fallback mock mode if no credentials provided).
+    # Create two integrations used by workflow; unconfigured connectors must remain honest and non-blocking.
     for provider in ['github', 'google_workspace']:
         create_integration = client.post(
             f"/projects/{seeded_ids['project_id']}/integrations",
@@ -60,6 +66,11 @@ def test_create_audit_run_happy_path(client, seeded_ids, monkeypatch):
 
     updated_run = get_run.json()
     assert updated_run['report_evidence_id']
+    evidence_summary = updated_run['summary_json']['evidence']
+    assert evidence_summary['github']['mode'] == 'unconfigured'
+    assert evidence_summary['github']['repo_count'] == 0
+    assert evidence_summary['google_workspace']['mode'] == 'unconfigured'
+    assert evidence_summary['google_workspace']['users_count'] == 0
 
     report_download = client.get(
         f"/evidence/{updated_run['report_evidence_id']}/download",

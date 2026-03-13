@@ -6,13 +6,14 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit_log import append_audit_log
 from app.auth_sessions import revoke_session, rotate_session
+from app.connectors.jira import handle_jira_webhook
 from app.config import get_settings
 from app.deps import UserContext, get_current_user, require_mfa, require_roles
 from app.models import (
@@ -24,6 +25,7 @@ from app.models import (
     Membership,
     OrgSecurityPolicy,
     OutboundIntegration,
+    Organization,
     PricingPlan,
     Project,
     RemediationComment,
@@ -42,6 +44,19 @@ from app.signing import verify_bundle
 from app.storage import get_object_store
 
 router = APIRouter()
+FEATURE_FLAG_KEYS = (
+    'enterprise_features_enabled',
+    'feature_auth_enterprise',
+    'feature_scim',
+    'feature_secret_store',
+    'feature_upload_av_scan',
+    'feature_signing',
+    'feature_rbac_abac',
+    'feature_approvals',
+    'feature_reporting_package',
+    'feature_pricing',
+)
+RUNTIME_FEATURE_OVERRIDES: dict[str, dict[str, bool]] = {}
 
 
 class SecretSetRequest(BaseModel):
@@ -107,6 +122,12 @@ class PricingPlanRequest(BaseModel):
     modules_json: dict[str, bool] = Field(default_factory=dict)
 
 
+class DPAStatusUpdateRequest(BaseModel):
+    status: str = Field(pattern='^(pending|requested|signed|waived)$')
+    reference: str | None = Field(default=None, max_length=255)
+    signed_at: datetime | None = None
+
+
 class OutboundIntegrationCreate(BaseModel):
     kind: str = Field(min_length=2, max_length=64)
     name: str = Field(min_length=2, max_length=255)
@@ -115,21 +136,57 @@ class OutboundIntegrationCreate(BaseModel):
     is_enabled: bool = True
 
 
-@router.get('/enterprise/features')
-async def enterprise_features() -> dict[str, Any]:
-    settings = get_settings()
+class FeatureFlagsUpdate(BaseModel):
+    enterprise_features_enabled: bool | None = None
+    feature_auth_enterprise: bool | None = None
+    feature_scim: bool | None = None
+    feature_secret_store: bool | None = None
+    feature_upload_av_scan: bool | None = None
+    feature_signing: bool | None = None
+    feature_rbac_abac: bool | None = None
+    feature_approvals: bool | None = None
+    feature_reporting_package: bool | None = None
+    feature_pricing: bool | None = None
+
+
+def _legal_onboarding_payload(org: Organization) -> dict[str, Any]:
     return {
-        'enterprise_features_enabled': settings.enterprise_features_enabled,
-        'feature_auth_enterprise': settings.feature_auth_enterprise,
-        'feature_scim': settings.feature_scim,
-        'feature_secret_store': settings.feature_secret_store,
-        'feature_upload_av_scan': settings.feature_upload_av_scan,
-        'feature_signing': settings.feature_signing,
-        'feature_rbac_abac': settings.feature_rbac_abac,
-        'feature_approvals': settings.feature_approvals,
-        'feature_reporting_package': settings.feature_reporting_package,
-        'feature_pricing': settings.feature_pricing,
+        'org_id': org.id,
+        'dpa_status': org.dpa_status,
+        'dpa_reference': org.dpa_reference,
+        'dpa_signed_at': org.dpa_signed_at.isoformat() if org.dpa_signed_at else None,
+        'onboarding_status': org.onboarding_status,
+        'onboarding_completed_at': org.onboarding_completed_at.isoformat() if org.onboarding_completed_at else None,
+        'blocking_issue': None if org.dpa_status == 'signed' else 'signed_dpa_required',
     }
+
+
+@router.get('/enterprise/features')
+async def enterprise_features(
+    _ctx: UserContext = Depends(get_current_user),
+) -> dict[str, Any]:
+    settings = get_settings()
+    values: dict[str, bool] = {key: bool(getattr(settings, key, False)) for key in FEATURE_FLAG_KEYS}
+    org_overrides = RUNTIME_FEATURE_OVERRIDES.get(_ctx.org_id, {})
+    values.update(org_overrides)
+    return values
+
+
+@router.put('/enterprise/features')
+async def update_enterprise_features(
+    payload: FeatureFlagsUpdate,
+    _ctx: UserContext = Depends(require_roles('org_admin')),
+) -> dict[str, bool]:
+    updates = payload.model_dump(exclude_none=True)
+    org_overrides = RUNTIME_FEATURE_OVERRIDES.setdefault(_ctx.org_id, {})
+    for key, value in updates.items():
+        if key not in FEATURE_FLAG_KEYS:
+            raise HTTPException(status_code=400, detail=f'Unknown feature flag: {key}')
+        org_overrides[key] = bool(value)
+    settings = get_settings()
+    values: dict[str, bool] = {key: bool(getattr(settings, key, False)) for key in FEATURE_FLAG_KEYS}
+    values.update(org_overrides)
+    return values
 
 
 # why this: this indirection keeps mypy/ruff happy while avoiding circular imports from local function binding.
@@ -256,6 +313,79 @@ async def get_security_policy(
         'max_upload_bytes': policy.max_upload_bytes,
         'retention_days': policy.retention_days,
     }
+
+
+@router.get('/organizations/{org_id}/legal/onboarding')
+async def get_legal_onboarding(
+    org_id: str,
+    ctx: UserContext = Depends(get_current_user),
+    db: AsyncSession = Depends(_get_db),
+) -> dict[str, Any]:
+    if org_id != ctx.org_id:
+        raise HTTPException(status_code=403, detail='Cross-tenant access denied')
+    org = await db.get(Organization, org_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail='Organization not found')
+    return _legal_onboarding_payload(org)
+
+
+@router.put('/organizations/{org_id}/legal/dpa')
+async def update_dpa_status(
+    org_id: str,
+    payload: DPAStatusUpdateRequest,
+    ctx: UserContext = Depends(require_roles('org_admin')),
+    db: AsyncSession = Depends(_get_db),
+) -> dict[str, Any]:
+    if org_id != ctx.org_id:
+        raise HTTPException(status_code=403, detail='Cross-tenant access denied')
+    org = await db.get(Organization, org_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail='Organization not found')
+    org.dpa_status = payload.status
+    org.dpa_reference = payload.reference
+    org.dpa_signed_at = payload.signed_at or (datetime.now(UTC) if payload.status == 'signed' else None)
+    if org.onboarding_status == 'completed' and payload.status != 'signed':
+        org.onboarding_status = 'pending_dpa'
+        org.onboarding_completed_at = None
+    await append_audit_log(
+        db,
+        org_id=org_id,
+        actor_user_id=ctx.user_id,
+        action='legal.dpa.update',
+        entity_type='organization',
+        entity_id=org_id,
+        payload={'status': org.dpa_status, 'reference': org.dpa_reference},
+    )
+    await db.commit()
+    return _legal_onboarding_payload(org)
+
+
+@router.post('/organizations/{org_id}/legal/onboarding/complete')
+async def complete_onboarding(
+    org_id: str,
+    ctx: UserContext = Depends(require_roles('org_admin')),
+    db: AsyncSession = Depends(_get_db),
+) -> dict[str, Any]:
+    if org_id != ctx.org_id:
+        raise HTTPException(status_code=403, detail='Cross-tenant access denied')
+    org = await db.get(Organization, org_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail='Organization not found')
+    if org.dpa_status != 'signed':
+        raise HTTPException(status_code=409, detail='Signed DPA is required before completing onboarding')
+    org.onboarding_status = 'completed'
+    org.onboarding_completed_at = datetime.now(UTC)
+    await append_audit_log(
+        db,
+        org_id=org_id,
+        actor_user_id=ctx.user_id,
+        action='legal.onboarding.completed',
+        entity_type='organization',
+        entity_id=org_id,
+        payload={'dpa_reference': org.dpa_reference},
+    )
+    await db.commit()
+    return _legal_onboarding_payload(org)
 
 
 @router.post('/organizations/{org_id}/scim/tokens')
@@ -792,3 +922,39 @@ async def emit_outbound_event(
         raise HTTPException(status_code=404, detail='Outbound integration not found')
     # why this: enterprise connectors run in async workers in production; API endpoint keeps vendor-neutral contract in MVP.
     return {'delivered': row.is_enabled, 'kind': row.kind, 'payload_size': len(json.dumps(payload))}
+
+
+@router.post('/webhooks/jira/{integration_id}')
+async def jira_webhook(
+    integration_id: str,
+    request: Request,
+    x_audity_webhook_secret: str | None = Header(default=None),
+    db: AsyncSession = Depends(_get_db),
+) -> dict[str, Any]:
+    integration = await db.scalar(
+        select(OutboundIntegration).where(
+            OutboundIntegration.id == integration_id,
+            OutboundIntegration.kind == 'jira',
+            OutboundIntegration.is_enabled.is_(True),
+        )
+    )
+    if integration is None:
+        raise HTTPException(status_code=404, detail='Jira integration not found')
+
+    payload = await request.json()
+    query_secret = request.query_params.get('secret')
+    provided_secret = x_audity_webhook_secret or query_secret
+    try:
+        result = await handle_jira_webhook(
+            db,
+            integration=integration,
+            payload=payload,
+            provided_secret=provided_secret,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    await db.commit()
+    return result

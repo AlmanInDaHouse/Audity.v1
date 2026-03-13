@@ -29,3 +29,4 @@ async def test_postgres_rls_blocks_cross_tenant_even_without_app_filter(org_cont
         assert updated.endswith('0')
     finally:
         await conn.close()
+    

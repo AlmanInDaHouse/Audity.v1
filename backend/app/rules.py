@@ -83,9 +83,30 @@ EVALUATORS = {
 }
 
 
+def _assessment_index(evidence: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    assessments = evidence.get('ai_assessment', {}).get('assessments', [])
+    return {str(item.get('control_id', '')): item for item in assessments}
+
+
 def evaluate_controls(controls: list[ControlDefinition], evidence: dict[str, Any]) -> list[ControlResult]:
     results: list[ControlResult] = []
+    ai_index = _assessment_index(evidence)
     for control in controls:
+        ai_item = ai_index.get(control.id)
+        if ai_item:
+            results.append(
+                ControlResult(
+                    control_id=control.id,
+                    title=control.title,
+                    framework=control.framework,
+                    severity=control.severity,
+                    result=str(ai_item.get('result', 'partial')),
+                    confidence=float(ai_item.get('confidence', 0.5)),
+                    notes=str(ai_item.get('notes', '')),
+                    evidence_refs=[str(item) for item in ai_item.get('evidence_refs', control.evidence_requirements)],
+                )
+            )
+            continue
         evaluator = EVALUATORS.get(control.evaluator_key, _eval_fallback)
         status, confidence, notes = evaluator(evidence)
         evidence_refs = control.evidence_requirements

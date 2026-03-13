@@ -8,13 +8,13 @@ from typing import Any
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit_log import append_audit_log
 from app.auth_sessions import issue_session
 from app.av_scanner import scan_upload_activity
-from app.config import get_settings
+from app.config import get_settings, validate_runtime_security
 from app.db import Base, engine, get_db
 from app.deps import UserContext, get_current_user, require_mfa, require_roles
 from app.enterprise import router as enterprise_router
@@ -29,10 +29,12 @@ from app.models import (
     Membership,
     Organization,
     OrgSecurityPolicy,
+    OutboundIntegration,
     PricingPlan,
     Project,
     RemediationTask,
     RoleEnum,
+    SeverityEnum,
     User,
 )
 from app.otel import setup_otel
@@ -67,10 +69,11 @@ ALLOWED_UPLOAD_MIME_TYPES = {
 }
 
 app = FastAPI(title='Audity API', version='0.1.0')
+_cors_origins = [o.strip() for o in settings.cors_allowed_origins.split(',') if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=['*'],
-    allow_credentials=False,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
     allow_methods=['*'],
     allow_headers=['*'],
 )
@@ -91,6 +94,7 @@ async def security_headers_middleware(request: Request, call_next):
 
 @app.on_event('startup')
 async def startup() -> None:
+    validate_runtime_security(settings)
     setup_otel(app)
     await rate_limiter.startup()
     store = get_object_store()
@@ -121,12 +125,16 @@ async def metrics() -> Response:
 @app.get('/.well-known/openid-configuration')
 async def oidc_configuration(request: Request) -> dict[str, Any]:
     base = settings.oidc_issuer.rstrip('/')
-    return {
+    payload: dict[str, Any] = {
         'issuer': base,
         'jwks_uri': f'{base}/jwks.json',
-        'token_endpoint': f'{base}/auth/mock/login',
         'id_token_signing_alg_values_supported': ['RS256'],
     }
+    if settings.oidc_token_endpoint:
+        payload['token_endpoint'] = settings.oidc_token_endpoint
+    elif settings.is_mock_login_enabled:
+        payload['token_endpoint'] = f'{base}/auth/mock/login'
+    return payload
 
 
 @app.get('/jwks.json')
@@ -134,8 +142,19 @@ async def jwks() -> dict[str, Any]:
     return get_signer().jwks()
 
 
+@app.get('/auth/config')
+async def auth_config() -> dict[str, Any]:
+    return {
+        'mock_login_enabled': settings.is_mock_login_enabled,
+        'enterprise_auth_enabled': settings.feature_auth_enterprise,
+        'demo_org_id': settings.demo_org_id,
+    }
+
+
 @app.post('/auth/mock/login')
 async def mock_login(payload: LoginRequest, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    if not settings.is_mock_login_enabled:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Mock login is disabled in this environment')
     await set_current_org(db, payload.org_id)
     user = await db.scalar(select(User).where(User.email == payload.email))
     if user is None:
@@ -177,6 +196,7 @@ def _project_to_dict(item: Project) -> dict[str, Any]:
         'name': item.name,
         'description': item.description,
         'criticality': item.criticality.value,
+        'created_at': item.created_at.isoformat(),
     }
 
 
@@ -190,6 +210,7 @@ def _integration_to_dict(item: Integration) -> dict[str, Any]:
         'config_json': item.config_json,
         'secret_ref': item.secret_ref,
         'is_enabled': item.is_enabled,
+        'created_at': item.created_at.isoformat(),
     }
 
 
@@ -228,6 +249,71 @@ def _audit_run_to_dict(item: AuditRun) -> dict[str, Any]:
         'risk_level': item.risk_level,
         'report_evidence_id': item.report_evidence_id,
         'signature_bundle_json': item.signature_bundle_json,
+        'created_at': item.created_at.isoformat(),
+        'updated_at': item.updated_at.isoformat(),
+    }
+
+
+def _percentage(part: int, total: int) -> int:
+    if total <= 0:
+        return 0
+    return round((part / total) * 100)
+
+
+async def _load_portfolio_snapshot(org_id: str, db: AsyncSession) -> dict[str, Any]:
+    projects = (
+        await db.execute(
+            select(Project).where(Project.org_id == org_id).order_by(Project.created_at.desc())
+        )
+    ).scalars().all()
+    project_ids = [project.id for project in projects]
+    runs = (
+        await db.execute(
+            select(AuditRun)
+            .where(AuditRun.org_id == org_id, AuditRun.project_id.in_(project_ids) if project_ids else False)
+            .order_by(AuditRun.updated_at.desc())
+        )
+    ).scalars().all()
+
+    latest_by_project: dict[str, AuditRun] = {}
+    runs_by_project: dict[str, list[AuditRun]] = {}
+    for run in runs:
+        latest_by_project.setdefault(run.project_id, run)
+        runs_by_project.setdefault(run.project_id, []).append(run)
+
+    project_rows = []
+    run_rows = []
+    report_rows = []
+    project_name_by_id = {project.id: project.name for project in projects}
+
+    for project in projects:
+        latest_run = latest_by_project.get(project.id)
+        project_runs = runs_by_project.get(project.id, [])
+        project_rows.append(
+            {
+                'project': _project_to_dict(project),
+                'latest_run': _audit_run_to_dict(latest_run) if latest_run else None,
+                'runs_total': len(project_runs),
+                'completed_runs': len([run for run in project_runs if run.status == AuditStatusEnum.completed]),
+            }
+        )
+
+    for run in runs:
+        row = {
+            'project': {
+                'id': run.project_id,
+                'name': project_name_by_id.get(run.project_id, 'Unknown project'),
+            },
+            'run': _audit_run_to_dict(run),
+        }
+        run_rows.append(row)
+        if run.status == AuditStatusEnum.completed and run.report_evidence_id:
+            report_rows.append(row)
+
+    return {
+        'projects': project_rows,
+        'audit_runs': run_rows,
+        'reports': report_rows,
     }
 
 
@@ -246,13 +332,252 @@ async def list_organizations(
     return [_org_to_dict(org) for org in orgs]
 
 
+async def _load_organization_dashboard(org_id: str, db: AsyncSession) -> dict[str, Any]:
+    organization = await db.get(Organization, org_id)
+    if organization is None:
+        raise HTTPException(status_code=404, detail='Organization not found')
+
+    plan = await db.get(PricingPlan, org_id)
+    policy = await db.get(OrgSecurityPolicy, org_id)
+
+    total_projects = int(
+        await db.scalar(select(func.count()).select_from(Project).where(Project.org_id == org_id)) or 0
+    )
+    total_runs = int(
+        await db.scalar(select(func.count()).select_from(AuditRun).where(AuditRun.org_id == org_id)) or 0
+    )
+    active_runs = int(
+        await db.scalar(
+            select(func.count())
+            .select_from(AuditRun)
+            .where(
+                AuditRun.org_id == org_id,
+                AuditRun.status.in_([AuditStatusEnum.queued, AuditStatusEnum.running]),
+            )
+        )
+        or 0
+    )
+    completed_runs = int(
+        await db.scalar(
+            select(func.count())
+            .select_from(AuditRun)
+            .where(AuditRun.org_id == org_id, AuditRun.status == AuditStatusEnum.completed)
+        )
+        or 0
+    )
+    total_evidence = int(
+        await db.scalar(select(func.count()).select_from(EvidenceItem).where(EvidenceItem.org_id == org_id)) or 0
+    )
+    clean_evidence = int(
+        await db.scalar(
+            select(func.count())
+            .select_from(EvidenceItem)
+            .where(EvidenceItem.org_id == org_id, EvidenceItem.scan_status == 'clean')
+        )
+        or 0
+    )
+    quarantined_evidence = max(total_evidence - clean_evidence, 0)
+    project_integrations = int(
+        await db.scalar(select(func.count()).select_from(Integration).where(Integration.org_id == org_id)) or 0
+    )
+    outbound_integrations = int(
+        await db.scalar(select(func.count()).select_from(OutboundIntegration).where(OutboundIntegration.org_id == org_id))
+        or 0
+    )
+    projects_with_integrations = int(
+        await db.scalar(
+            select(func.count(func.distinct(Integration.project_id))).where(
+                Integration.org_id == org_id,
+                Integration.is_enabled.is_(True),
+            )
+        )
+        or 0
+    )
+    projects_with_completed_runs = int(
+        await db.scalar(
+            select(func.count(func.distinct(AuditRun.project_id))).where(
+                AuditRun.org_id == org_id,
+                AuditRun.status == AuditStatusEnum.completed,
+            )
+        )
+        or 0
+    )
+    open_findings = int(
+        await db.scalar(
+            select(func.count()).select_from(Finding).where(Finding.org_id == org_id, Finding.status == 'open')
+        )
+        or 0
+    )
+    critical_findings = int(
+        await db.scalar(
+            select(func.count())
+            .select_from(Finding)
+            .where(
+                Finding.org_id == org_id,
+                Finding.status == 'open',
+                Finding.severity == SeverityEnum.high,
+            )
+        )
+        or 0
+    )
+    overdue_tasks = int(
+        await db.scalar(
+            select(func.count())
+            .select_from(RemediationTask)
+            .where(
+                RemediationTask.org_id == org_id,
+                RemediationTask.status != 'resolved',
+                RemediationTask.sla_due_at.is_not(None),
+                RemediationTask.sla_due_at < datetime.now(UTC),
+            )
+        )
+        or 0
+    )
+
+    recent_runs = (
+        await db.execute(
+            select(AuditRun, Project.name)
+            .join(Project, Project.id == AuditRun.project_id)
+            .where(AuditRun.org_id == org_id)
+            .order_by(AuditRun.updated_at.desc())
+            .limit(6)
+        )
+    ).all()
+    recent_activity = (
+        await db.execute(
+            select(AuditLogEntry)
+            .where(AuditLogEntry.org_id == org_id)
+            .order_by(AuditLogEntry.created_at.desc())
+            .limit(8)
+        )
+    ).scalars().all()
+
+    max_assets = plan.max_assets if plan is not None else 50
+    module_flags = plan.modules_json if plan is not None else {}
+    enabled_modules = sorted([key for key, enabled in module_flags.items() if enabled])
+
+    readiness_items = [
+        {
+            'key': 'workflow_coverage',
+            'label': 'Workflow coverage',
+            'ready': projects_with_completed_runs > 0,
+            'detail': f'{projects_with_completed_runs}/{total_projects} projects have completed audits',
+        },
+        {
+            'key': 'integration_coverage',
+            'label': 'Integration coverage',
+            'ready': projects_with_integrations > 0,
+            'detail': f'{projects_with_integrations}/{total_projects} projects have enabled integrations',
+        },
+        {
+            'key': 'security_policy',
+            'label': 'Security policy',
+            'ready': bool(policy and policy.require_mfa_sensitive),
+            'detail': 'Sensitive actions protected with MFA policy',
+        },
+        {
+            'key': 'evidence_integrity',
+            'label': 'Evidence integrity',
+            'ready': settings.feature_signing and clean_evidence > 0,
+            'detail': f'{clean_evidence}/{total_evidence} evidence items passed integrity-safe download flow',
+        },
+        {
+            'key': 'dpa_gate',
+            'label': 'DPA gate',
+            'ready': organization.dpa_status == 'signed',
+            'detail': 'Customer onboarding remains blocked until a signed DPA is registered',
+        },
+        {
+            'key': 'enterprise_controls',
+            'label': 'Enterprise controls',
+            'ready': settings.enterprise_features_enabled,
+            'detail': 'Enterprise controls feature gate available',
+        },
+    ]
+    readiness_score = _percentage(sum(1 for item in readiness_items if item['ready']), len(readiness_items))
+
+    return {
+        'org_id': organization.id,
+        'org_name': organization.name,
+        'generated_at': datetime.now(UTC).isoformat(),
+        'legal': {
+            'dpa_status': organization.dpa_status,
+            'dpa_reference': organization.dpa_reference,
+            'dpa_signed_at': organization.dpa_signed_at.isoformat() if organization.dpa_signed_at else None,
+            'onboarding_status': organization.onboarding_status,
+            'onboarding_completed_at': organization.onboarding_completed_at.isoformat() if organization.onboarding_completed_at else None,
+        },
+        'summary': {
+            'projects_total': total_projects,
+            'audit_runs_total': total_runs,
+            'active_runs': active_runs,
+            'completed_runs': completed_runs,
+            'evidence_total': total_evidence,
+            'quarantined_evidence': quarantined_evidence,
+            'open_findings': open_findings,
+            'critical_findings': critical_findings,
+            'overdue_tasks': overdue_tasks,
+            'project_integrations': project_integrations,
+            'outbound_integrations': outbound_integrations,
+            'audit_coverage_pct': _percentage(projects_with_completed_runs, total_projects),
+            'automation_coverage_pct': _percentage(projects_with_integrations, total_projects),
+            'evidence_hygiene_pct': _percentage(clean_evidence, total_evidence),
+        },
+        'plan': {
+            'plan_code': plan.plan_code if plan is not None else 'starter',
+            'max_assets': max_assets,
+            'assets_used': total_projects,
+            'asset_usage_pct': _percentage(total_projects, max_assets),
+            'max_upload_bytes': plan.max_upload_bytes if plan is not None else 20 * 1024 * 1024,
+            'modules_enabled': enabled_modules,
+        },
+        'readiness': {
+            'score': readiness_score,
+            'items': readiness_items,
+        },
+        'recent_runs': [
+            {
+                'id': run.id,
+                'project_id': run.project_id,
+                'project_name': project_name,
+                'status': run.status.value,
+                'risk_score': run.risk_score,
+                'risk_level': run.risk_level,
+                'updated_at': run.updated_at.isoformat(),
+            }
+            for run, project_name in recent_runs
+        ],
+        'recent_activity': [
+            {
+                'id': row.id,
+                'action': row.action,
+                'entity_type': row.entity_type,
+                'entity_id': row.entity_id,
+                'created_at': row.created_at.isoformat(),
+            }
+            for row in recent_activity
+        ],
+    }
+
+
+@app.get('/organizations/{org_id}/dashboard')
+async def get_organization_dashboard(
+    org_id: str,
+    ctx: UserContext = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    if org_id != ctx.org_id:
+        raise HTTPException(status_code=403, detail='Cross-tenant access denied')
+    return await _load_organization_dashboard(org_id, db)
+
+
 @app.post('/organizations')
 async def create_organization(
     payload: OrganizationCreate,
     ctx: UserContext = Depends(require_roles('org_admin')),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    org = Organization(name=payload.name)
+    org = Organization(name=payload.name, dpa_status='pending', onboarding_status='pending_dpa')
     db.add(org)
     await db.flush()
 
@@ -293,6 +618,17 @@ async def list_projects(
     return [_project_to_dict(row) for row in rows]
 
 
+@app.get('/organizations/{org_id}/portfolio')
+async def get_portfolio_snapshot(
+    org_id: str,
+    ctx: UserContext = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    if org_id != ctx.org_id:
+        raise HTTPException(status_code=403, detail='Cross-tenant access denied')
+    return await _load_portfolio_snapshot(org_id, db)
+
+
 @app.post('/organizations/{org_id}/projects')
 async def create_project(
     org_id: str,
@@ -322,7 +658,6 @@ async def create_project(
         payload={'name': payload.name},
     )
     await db.commit()
-    await db.refresh(project)
     return _project_to_dict(project)
 
 
@@ -433,7 +768,6 @@ async def create_integration(
         payload={'provider': integration.provider},
     )
     await db.commit()
-    await db.refresh(integration)
     return _integration_to_dict(integration)
 
 
@@ -534,7 +868,6 @@ async def create_control_catalog(
         payload={'framework': payload.framework, 'version': payload.version},
     )
     await db.commit()
-    await db.refresh(catalog)
     return _catalog_to_dict(catalog)
 
 
@@ -552,6 +885,8 @@ async def delete_control_catalog(
     )
     if catalog is None:
         raise HTTPException(status_code=404, detail='Catalog not found')
+    if catalog.is_global and catalog.org_id != ctx.org_id:
+        raise HTTPException(status_code=403, detail='Cannot delete global catalogs')
     await db.delete(catalog)
     await append_audit_log(
         db,
@@ -608,9 +943,47 @@ async def create_audit_run(
         catalog_version=payload.catalog_version,
     )
     await launch_audit_workflow(wf_input)
-
-    await db.refresh(run)
     return _audit_run_to_dict(run)
+
+
+@app.get('/projects/{project_id}/audit-runs')
+async def list_audit_runs(
+    project_id: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    ctx: UserContext = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    await _project_for_org(db, project_id, ctx.org_id)
+    offset = (page - 1) * page_size
+
+    total = await db.scalar(
+        select(func.count())
+        .select_from(AuditRun)
+        .where(
+            AuditRun.org_id == ctx.org_id,
+            AuditRun.project_id == project_id,
+        )
+    )
+    rows = (
+        await db.execute(
+            select(AuditRun)
+            .where(
+                AuditRun.org_id == ctx.org_id,
+                AuditRun.project_id == project_id,
+            )
+            .order_by(AuditRun.updated_at.desc())
+            .offset(offset)
+            .limit(page_size)
+        )
+    ).scalars().all()
+
+    return {
+        'items': [_audit_run_to_dict(row) for row in rows],
+        'page': page,
+        'page_size': page_size,
+        'total': int(total or 0),
+    }
 
 
 @app.get('/projects/{project_id}/audit-runs/{run_id}')
@@ -692,7 +1065,11 @@ async def list_remediation_tasks(
             'finding_id': row.finding_id,
             'title': row.title,
             'description': row.description,
+            'assignee_user_id': row.assignee_user_id,
+            'due_date': row.due_date.isoformat() if row.due_date else None,
+            'sla_due_at': row.sla_due_at.isoformat() if row.sla_due_at else None,
             'status': row.status,
+            'created_at': row.created_at.isoformat(),
         }
         for row in rows
     ]
@@ -787,7 +1164,6 @@ async def upload_evidence(
         payload={'project_id': project_id, 'item_type': item_type, 'filename': evidence.name},
     )
     await db.commit()
-    await db.refresh(evidence)
 
     return {
         'id': evidence.id,
@@ -803,6 +1179,75 @@ async def upload_evidence(
         'quarantine_reason': evidence.quarantine_reason,
         'metadata_json': evidence.metadata_json,
         'signature_bundle_json': evidence.signature_bundle_json,
+        'created_at': evidence.created_at.isoformat(),
+    }
+
+
+@app.get('/organizations/{org_id}/evidence')
+async def list_evidence(
+    org_id: str,
+    project_id: str | None = Query(default=None),
+    item_type: str | None = Query(default=None),
+    scan_status: str | None = Query(default=None),
+    quarantined: bool | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    ctx: UserContext = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    if org_id != ctx.org_id:
+        raise HTTPException(status_code=403, detail='Cross-tenant access denied')
+    if project_id:
+        await _project_for_org(db, project_id, ctx.org_id)
+
+    filters = [EvidenceItem.org_id == ctx.org_id]
+    if project_id:
+        filters.append(EvidenceItem.project_id == project_id)
+    if item_type:
+        filters.append(EvidenceItem.item_type == item_type)
+    if scan_status:
+        filters.append(EvidenceItem.scan_status == scan_status)
+    if quarantined is True:
+        filters.append(EvidenceItem.scan_status != 'clean')
+    if quarantined is False:
+        filters.append(EvidenceItem.scan_status == 'clean')
+
+    offset = (page - 1) * page_size
+    total = await db.scalar(select(func.count()).select_from(EvidenceItem).where(*filters))
+    rows = (
+        await db.execute(
+            select(EvidenceItem)
+            .where(*filters)
+            .order_by(EvidenceItem.created_at.desc())
+            .offset(offset)
+            .limit(page_size)
+        )
+    ).scalars().all()
+
+    items = [
+        {
+            'id': row.id,
+            'org_id': row.org_id,
+            'project_id': row.project_id,
+            'audit_run_id': row.audit_run_id,
+            'integration_id': row.integration_id,
+            'item_type': row.item_type,
+            'name': row.name,
+            'object_key': row.object_key,
+            'sha256': row.sha256,
+            'scan_status': row.scan_status,
+            'quarantine_reason': row.quarantine_reason,
+            'metadata_json': row.metadata_json,
+            'signature_bundle_json': row.signature_bundle_json,
+            'created_at': row.created_at.isoformat(),
+        }
+        for row in rows
+    ]
+    return {
+        'items': items,
+        'page': page,
+        'page_size': page_size,
+        'total': int(total or 0),
     }
 
 

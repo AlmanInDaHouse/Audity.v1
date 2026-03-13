@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -13,21 +12,26 @@ from sqlalchemy import delete, select
 
 from app.audit_log import append_audit_log
 from app.catalog_engine import load_controls
+from app.connectors.jira import sync_finding_to_jira
 from app.config import get_settings
 from app.db import SessionLocal
+from app.knowledge_engine import evaluate_manual_evidence
 from app.models import (
     AuditRun,
     AuditStatusEnum,
     EvidenceItem,
+    ExternalTicket,
     Finding,
     Integration,
+    OutboundIntegration,
     Project,
     RemediationTask,
     ResultEnum,
     SeverityEnum,
 )
-from app.reporting import render_report_html, render_report_pdf
+from app.package_export import build_executive_report
 from app.rules import ControlResult, calculate_risk, evaluate_controls
+from app.secret_store import SecretStoreError, get_secret_store
 from app.signing import sign_manifest
 from app.storage import get_object_store
 from app.tenancy import set_current_org
@@ -113,6 +117,15 @@ async def _github_headers(token: str) -> dict[str, str]:
     }
 
 
+async def _resolve_integration_secret(secret_ref: str | None, fallback: str = '') -> str:
+    if not secret_ref:
+        return fallback
+    try:
+        return await get_secret_store().get(secret_ref)
+    except SecretStoreError:
+        return fallback
+
+
 async def collect_github_evidence(input_data: AuditWorkflowInput, integrations: list[dict[str, Any]]) -> dict[str, Any]:
     await _update_run_progress(input_data.audit_run_id, org_id=input_data.org_id, stage='collect_github_evidence')
     settings = get_settings()
@@ -122,11 +135,10 @@ async def collect_github_evidence(input_data: AuditWorkflowInput, integrations: 
 
     token = settings.github_token
     if github_int.get('secret_ref'):
-        token = os.getenv(github_int['secret_ref'], token)
+        token = await _resolve_integration_secret(github_int['secret_ref'], token)
 
     if not token:
-        # why this: connector remains non-blocking in MVP when credentials are missing.
-        return {'mode': 'mock_fallback', 'repo_count': 3, 'protected_repos': 2, 'repos_with_required_checks': 2}
+        return {'mode': 'unconfigured', 'repo_count': 0, 'protected_repos': 0, 'repos_with_required_checks': 0}
 
     repo_names: list[str] = github_int.get('config_json', {}).get('repos', [])
     protected = 0
@@ -144,7 +156,13 @@ async def collect_github_evidence(input_data: AuditWorkflowInput, integrations: 
         else:
             repos_resp = await client.get('https://api.github.com/user/repos?per_page=20', headers=headers)
             if repos_resp.status_code != 200:
-                return {'mode': 'mock_fallback', 'repo_count': 2, 'protected_repos': 1, 'repos_with_required_checks': 1}
+                return {
+                    'mode': 'error',
+                    'repo_count': 0,
+                    'protected_repos': 0,
+                    'repos_with_required_checks': 0,
+                    'error': f'github_api_http_{repos_resp.status_code}',
+                }
             repos = repos_resp.json()
 
         for repo in repos[:10]:
@@ -181,10 +199,10 @@ async def collect_google_workspace_evidence(input_data: AuditWorkflowInput, inte
 
     service_json_b64 = settings.google_service_account_json_b64
     if google_int.get('secret_ref'):
-        service_json_b64 = os.getenv(google_int['secret_ref'], service_json_b64)
+        service_json_b64 = await _resolve_integration_secret(google_int['secret_ref'], service_json_b64)
 
     if not service_json_b64:
-        return {'mode': 'mock_fallback', 'users_count': 25, 'groups_count': 7}
+        return {'mode': 'unconfigured', 'users_count': 0, 'groups_count': 0}
 
     try:
         from google.oauth2 import service_account
@@ -206,8 +224,8 @@ async def collect_google_workspace_evidence(input_data: AuditWorkflowInput, inte
         users_count = len(users.get('users', []))
         groups_count = len(groups.get('groups', []))
         return {'mode': 'real', 'users_count': users_count, 'groups_count': groups_count}
-    except Exception:
-        return {'mode': 'mock_fallback', 'users_count': 18, 'groups_count': 5}
+    except Exception as exc:
+        return {'mode': 'error', 'users_count': 0, 'groups_count': 0, 'error': str(exc)}
 
 
 async def collect_manual_evidence_refs(input_data: AuditWorkflowInput) -> list[dict[str, Any]]:
@@ -228,10 +246,19 @@ async def collect_manual_evidence_refs(input_data: AuditWorkflowInput) -> list[d
                 'id': row.id,
                 'name': row.name,
                 'sha256': row.sha256,
+                'object_key': row.object_key,
+                'content_type': row.metadata_json.get('content_type', 'application/octet-stream'),
                 'metadata': row.metadata_json,
+                'scan_status': row.scan_status,
             }
             for row in rows
+            if row.scan_status == 'clean'
         ]
+
+
+async def evaluate_document_evidence(input_data: AuditWorkflowInput, evidence: dict[str, Any]) -> dict[str, Any]:
+    await _update_run_progress(input_data.audit_run_id, org_id=input_data.org_id, stage='evaluate_document_evidence')
+    return await evaluate_manual_evidence(evidence.get('manual', []))
 
 
 def _derive_remediation(results: list[ControlResult]) -> list[dict[str, str]]:
@@ -286,27 +313,23 @@ async def generate_report_activity(
         await set_current_org(db, input_data.org_id)
         project = await db.get(Project, input_data.project_id)
         project_name = project.name if project else 'Unknown'
-        context = {
-            'audit_run_id': input_data.audit_run_id,
-            'project_name': project_name,
-            'org_name': input_data.org_id,
-            'risk_score': risk['risk_score'],
-            'risk_level': risk['risk_level'],
-            'total_controls': control_eval['total_controls'],
-            'findings': findings,
-            'remediation_tasks': remediation_tasks,
-            'evidence_summary': evidence,
-        }
-
-    html = render_report_html(context)
-    pdf = render_report_pdf(html)
+    executive = build_executive_report(
+        org_id=input_data.org_id,
+        project_name=project_name,
+        audit_run_id=input_data.audit_run_id,
+        risk_score=risk['risk_score'],
+        risk_level=risk['risk_level'],
+        findings=findings,
+        remediation_tasks=remediation_tasks,
+        evidence_summary=evidence,
+    )
     store = get_object_store()
     await store.ensure_bucket()
 
     html_key = f'reports/{input_data.org_id}/{input_data.project_id}/{input_data.audit_run_id}.html'
     pdf_key = f'reports/{input_data.org_id}/{input_data.project_id}/{input_data.audit_run_id}.pdf'
-    html_stored = await store.put_bytes(html_key, html.encode('utf-8'), 'text/html; charset=utf-8')
-    pdf_stored = await store.put_bytes(pdf_key, pdf, 'application/pdf')
+    html_stored = await store.put_bytes(html_key, executive.html.encode('utf-8'), 'text/html; charset=utf-8')
+    pdf_stored = await store.put_bytes(pdf_key, executive.pdf, 'application/pdf')
     html_manifest = {
         'type': 'report_html',
         'org_id': input_data.org_id,
@@ -387,6 +410,16 @@ async def persist_results_activity(
         if run is None:
             raise ValueError('AuditRun not found')
 
+        existing_finding_ids = (
+            await db.execute(select(Finding.id).where(Finding.audit_run_id == run.id, Finding.org_id == input_data.org_id))
+        ).scalars().all()
+        if existing_finding_ids:
+            await db.execute(
+                delete(ExternalTicket).where(
+                    ExternalTicket.org_id == input_data.org_id,
+                    ExternalTicket.finding_id.in_(list(existing_finding_ids)),
+                )
+            )
         await db.execute(delete(Finding).where(Finding.audit_run_id == run.id))
         await db.execute(delete(RemediationTask).where(RemediationTask.audit_run_id == run.id))
 
@@ -408,6 +441,7 @@ async def persist_results_activity(
             db.add(finding)
 
         await db.flush()
+        task_by_finding: dict[str, RemediationTask] = {}
         for idx, task_item in enumerate(report_meta['remediation_tasks']):
             linked_finding_id = findings[idx].id if idx < len(findings) else None
             task = RemediationTask(
@@ -420,6 +454,8 @@ async def persist_results_activity(
                 status=task_item['status'],
             )
             db.add(task)
+            if linked_finding_id:
+                task_by_finding[linked_finding_id] = task
 
         run.summary_json = {
             'total_controls': control_eval['total_controls'],
@@ -442,6 +478,38 @@ async def persist_results_activity(
             entity_id=input_data.audit_run_id,
             payload={'risk_score': risk['risk_score'], 'risk_level': risk['risk_level']},
         )
+        project = await db.get(Project, input_data.project_id)
+        outbound_integrations = (
+            await db.execute(
+                select(OutboundIntegration).where(
+                    OutboundIntegration.org_id == input_data.org_id,
+                    OutboundIntegration.kind == 'jira',
+                    OutboundIntegration.is_enabled.is_(True),
+                )
+            )
+        ).scalars().all()
+        for integration in outbound_integrations:
+            for finding in findings:
+                if finding.result == ResultEnum.passed or project is None:
+                    continue
+                try:
+                    await sync_finding_to_jira(
+                        db,
+                        integration=integration,
+                        project=project,
+                        finding=finding,
+                        task=task_by_finding.get(finding.id),
+                    )
+                except Exception as exc:
+                    await append_audit_log(
+                        db,
+                        org_id=input_data.org_id,
+                        actor_user_id=input_data.actor_user_id,
+                        action='connector.jira.issue_failed',
+                        entity_type='finding',
+                        entity_id=finding.id,
+                        payload={'integration_id': integration.id, 'error': str(exc)},
+                    )
         await db.commit()
 
     return {
@@ -481,6 +549,7 @@ async def execute_inline(input_data: AuditWorkflowInput) -> dict[str, Any]:
         google = await collect_google_workspace_evidence(input_data, integrations)
         manual = await collect_manual_evidence_refs(input_data)
         evidence = {'github': github, 'google_workspace': google, 'manual': manual}
+        evidence['ai_assessment'] = await evaluate_document_evidence(input_data, evidence)
         control_eval = await evaluate_controls_activity(input_data, evidence)
         risk = await calculate_risk_activity(input_data, control_eval)
         report_meta = await generate_report_activity(input_data, evidence, control_eval, risk)

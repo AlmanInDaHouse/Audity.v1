@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>{{ brand_name }} Executive Report</title>
+    <style>
+      :root {
+        --ink: #112030;
+        --muted: #5d6b7a;
+        --accent: #0f766e;
+        --accent-soft: #d9f4ef;
+        --critical: #b42318;
+        --bg: #f6f8fb;
+        --panel: #ffffff;
+        --border: #d8dee8;
+      }
+      * { box-sizing: border-box; }
+      body {
+        font-family: "DejaVu Sans", sans-serif;
+        color: var(--ink);
+        background: linear-gradient(180deg, #ffffff 0%, #eef5f8 100%);
+        margin: 0;
+      }
+      .page {
+        padding: 32px;
+      }
+      .hero {
+        background: radial-gradient(circle at top left, #d9f4ef, #ffffff 62%);
+        border: 1px solid var(--border);
+        border-radius: 20px;
+        padding: 28px;
+        margin-bottom: 24px;
+      }
+      .eyebrow {
+        color: var(--accent);
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      h1, h2, h3, p {
+        margin: 0;
+      }
+      h1 {
+        font-size: 30px;
+        margin-top: 8px;
+      }
+      .subtitle {
+        color: var(--muted);
+        margin-top: 8px;
+        font-size: 14px;
+      }
+      .meta {
+        margin-top: 18px;
+        display: flex;
+        gap: 16px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 16px;
+        margin-bottom: 24px;
+      }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        padding: 20px;
+      }
+      .metric {
+        font-size: 28px;
+        font-weight: 700;
+        margin-top: 8px;
+      }
+      .hint {
+        color: var(--muted);
+        font-size: 12px;
+        margin-top: 6px;
+      }
+      .section {
+        margin-top: 24px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 12px;
+        font-size: 12px;
+      }
+      th, td {
+        border-bottom: 1px solid var(--border);
+        padding: 10px 0;
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        color: var(--muted);
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+      .pill {
+        display: inline-block;
+        padding: 4px 10px;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: var(--accent);
+        font-size: 11px;
+        font-weight: 700;
+      }
+      .critical {
+        color: var(--critical);
+      }
+      .footer {
+        margin-top: 30px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <section class="hero">
+        <p class="eyebrow">{{ brand_name }} Executive Compliance Report</p>
+        <h1>{{ project_name }}</h1>
+        <p class="subtitle">
+          ISO 27001 readiness summary for audit run {{ audit_run_id }}. This document is generated for enterprise review
+          and operational follow-up.
+        </p>
+        <div class="meta">
+          <span>Organization: {{ org_id }}</span>
+          <span>Generated: {{ generated_at }}</span>
+          <span>Support: {{ support_email }}</span>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
+          <p class="eyebrow">Risk Score</p>
+          <p class="metric">{{ risk_score if risk_score is not none else "n/a" }}</p>
+          <p class="hint">Normalized risk outcome for the current run.</p>
+        </article>
+        <article class="panel">
+          <p class="eyebrow">Risk Level</p>
+          <p class="metric">{{ risk_level|upper }}</p>
+          <p class="hint">Categorized for executive escalation and board reporting.</p>
+        </article>
+        <article class="panel">
+          <p class="eyebrow">Critical Findings</p>
+          <p class="metric critical">{{ critical_findings }}</p>
+          <p class="hint">{{ findings_total }} total findings requiring follow-up.</p>
+        </article>
+      </section>
+
+      <section class="panel">
+        <p class="eyebrow">Priority Actions</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Action</th>
+              <th>Status</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for task in priority_actions %}
+            <tr>
+              <td>{{ task.title }}</td>
+              <td><span class="pill">{{ task.status }}</span></td>
+              <td>{{ task.description }}</td>
+            </tr>
+            {% else %}
+            <tr>
+              <td colspan="3">No remediation actions were generated.</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </section>
+
+      <section class="panel section">
+        <p class="eyebrow">Findings Summary</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Control</th>
+              <th>Severity</th>
+              <th>Result</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for finding in findings %}
+            <tr>
+              <td>{{ finding.control_id }}<br /><strong>{{ finding.title }}</strong></td>
+              <td>{{ finding.severity }}</td>
+              <td>{{ finding.result }}</td>
+              <td>{{ finding.notes }}</td>
+            </tr>
+            {% else %}
+            <tr>
+              <td colspan="4">No findings were identified in this run.</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </section>
+
+      <section class="panel section">
+        <p class="eyebrow">Evidence Channels</p>
+        <pre>{{ evidence_summary | tojson(indent=2) }}</pre>
+      </section>
+
+      <p class="footer">
+        This report is generated by {{ brand_name }}. For legal-grade distribution, pair it with the signed auditor package
+        and evidence manifest.
+      </p>
+    </main>
+  </body>
+</html>

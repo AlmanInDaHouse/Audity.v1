@@ -14,6 +14,7 @@ from app.workflow_runtime import (
     collect_github_evidence,
     collect_google_workspace_evidence,
     collect_manual_evidence_refs,
+    evaluate_document_evidence,
     evaluate_controls_activity,
     generate_report_activity,
     mark_audit_failed,
@@ -49,6 +50,11 @@ async def collect_google_workspace_evidence_activity(input_data: dict[str, Any],
 @activity.defn
 async def collect_manual_evidence_refs_activity(input_data: dict[str, Any]) -> list[dict[str, Any]]:
     return await collect_manual_evidence_refs(AuditWorkflowInput(**input_data))
+
+
+@activity.defn
+async def evaluate_document_evidence_activity(input_data: dict[str, Any], evidence: dict[str, Any]) -> dict[str, Any]:
+    return await evaluate_document_evidence(AuditWorkflowInput(**input_data), evidence)
 
 
 @activity.defn
@@ -132,6 +138,12 @@ class AuditRunWorkflow:
                 retry_policy=retry,
             )
             evidence = {'github': github, 'google_workspace': google, 'manual': manual}
+            evidence['ai_assessment'] = await workflow.execute_activity(
+                evaluate_document_evidence_activity,
+                args=[payload, evidence],
+                schedule_to_close_timeout=timeout,
+                retry_policy=retry,
+            )
             control_eval = await workflow.execute_activity(
                 evaluate_controls_activity_wrapper,
                 args=[payload, evidence],
@@ -170,6 +182,7 @@ ACTIVITIES = [
     collect_github_evidence_activity,
     collect_google_workspace_evidence_activity,
     collect_manual_evidence_refs_activity,
+    evaluate_document_evidence_activity,
     evaluate_controls_activity_wrapper,
     calculate_risk_activity_wrapper,
     generate_report_activity_wrapper,

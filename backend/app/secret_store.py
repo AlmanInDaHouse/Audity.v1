@@ -8,8 +8,12 @@ from secrets import token_bytes
 
 import httpx
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from sqlalchemy import select
 
 from app.config import get_settings
+from app.db import SessionLocal
+from app.models import SecretRecord
+from app.tenancy import set_current_org
 
 
 class SecretStoreError(RuntimeError):
@@ -84,6 +88,37 @@ class EnvSecretStore(SecretStore):
         return self.cipher.decrypt(encrypted)
 
 
+class DatabaseSecretStore(SecretStore):
+    def __init__(self) -> None:
+        settings = get_settings()
+        self.cipher = EnvelopeCipher(settings.secret_encryption_key)
+
+    async def set(self, org_id: str, name: str, value: str) -> str:
+        ref = _build_ref(org_id, name)
+        encrypted = self.cipher.encrypt(value)
+        async with SessionLocal() as db:
+            await set_current_org(db, org_id)
+            row = await db.scalar(select(SecretRecord).where(SecretRecord.org_id == org_id, SecretRecord.name == name))
+            if row is None:
+                row = SecretRecord(org_id=org_id, name=name, ciphertext=encrypted)
+                db.add(row)
+            else:
+                row.ciphertext = encrypted
+            await db.commit()
+        return ref
+
+    async def get(self, secret_ref: str) -> str:
+        if secret_ref in os.environ:
+            return os.environ[secret_ref]
+        org_id, name = _parse_ref(secret_ref)
+        async with SessionLocal() as db:
+            await set_current_org(db, org_id)
+            row = await db.scalar(select(SecretRecord).where(SecretRecord.org_id == org_id, SecretRecord.name == name))
+        if row is None:
+            raise SecretStoreError('Secret not found')
+        return self.cipher.decrypt(row.ciphertext)
+
+
 class VaultSecretStore(SecretStore):
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -121,6 +156,8 @@ def _build_store() -> SecretStore:
     settings = get_settings()
     if settings.secret_store_backend == 'vault':
         return VaultSecretStore()
+    if settings.secret_store_backend == 'db':
+        return DatabaseSecretStore()
     return EnvSecretStore()
 
 

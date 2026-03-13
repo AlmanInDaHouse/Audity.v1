@@ -1,0 +1,57 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="audityGradient" x1="92" y1="416" x2="428" y2="96" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B4C8F" />
+      <stop offset="0.52" stop-color="#1769AF" />
+      <stop offset="1" stop-color="#58CEC6" />
+    </linearGradient>
+    <filter id="audityShadow" x="44" y="44" width="424" height="424" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#0B4C8F" flood-opacity="0.12" />
+    </filter>
+  </defs>
+  <g filter="url(#audityShadow)">
+    <path
+      d="M170 116C214 82 274 68 331 79L314 112C268 104 220 115 184 143L170 116Z"
+      fill="url(#audityGradient)"
+    />
+    <path
+      d="M333 81C379 98 416 132 437 177L406 189C389 153 360 125 323 112L333 81Z"
+      fill="url(#audityGradient)"
+    />
+    <path
+      d="M437 177C454 215 458 260 446 301L413 293C422 258 419 221 404 189L437 177Z"
+      fill="url(#audityGradient)"
+    />
+    <path
+      d="M446 301C431 353 395 397 347 423L331 393C369 372 397 337 413 293L446 301Z"
+      fill="url(#audityGradient)"
+    />
+    <path
+      d="M347 423C292 451 227 454 171 430L186 398C231 417 282 415 327 392L347 423Z"
+      fill="url(#audityGradient)"
+    />
+    <path
+      d="M171 430C122 408 86 367 68 315L101 303C115 343 143 375 186 398L171 430Z"
+      fill="url(#audityGradient)"
+    />
+    <path
+      d="M68 315C55 266 58 213 80 166L110 181C93 219 90 261 101 303L68 315Z"
+      fill="url(#audityGradient)"
+    />
+    <path
+      d="M80 166C101 122 134 88 176 67L189 97C156 114 129 141 110 181L80 166Z"
+      fill="url(#audityGradient)"
+    />
+    <path
+      d="M257 98L362 389H323L257 197L191 389H151L257 98Z"
+      fill="url(#audityGradient)"
+    />
+    <path
+      d="M182 298L256 366L357 237L381 259L258 417L158 326L182 298Z"
+      fill="url(#audityGradient)"
+    />
+    <rect x="232" y="222" width="16" height="44" rx="8" fill="url(#audityGradient)" />
+    <rect x="254" y="202" width="16" height="64" rx="8" fill="url(#audityGradient)" />
+    <rect x="276" y="234" width="16" height="32" rx="8" fill="url(#audityGradient)" />
+  </g>
+</svg>

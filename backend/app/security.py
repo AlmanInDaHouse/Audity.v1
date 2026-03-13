@@ -6,6 +6,7 @@ import json
 import secrets
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import jwt
@@ -41,8 +42,17 @@ class OIDCSigner:
             private_bytes = base64.b64decode(private_key_b64)
             self.private_key = serialization.load_pem_private_key(private_bytes, password=None)
         else:
-            # why this: local mock OIDC must work without external IdP or pre-generated key material.
-            self.private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            key_path = Path(settings.oidc_private_key_path).expanduser()
+            if key_path.exists():
+                private_bytes = key_path.read_bytes()
+                self.private_key = serialization.load_pem_private_key(private_bytes, password=None)
+            elif settings.is_mock_login_enabled:
+                # why this: local/dev runtimes need a stable signer without forcing external IdP provisioning.
+                self.private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+                key_path.parent.mkdir(parents=True, exist_ok=True)
+                key_path.write_bytes(self.private_pem)
+            else:
+                raise RuntimeError('OIDC signing key is not configured. Set OIDC_PRIVATE_KEY_B64 or mount OIDC_PRIVATE_KEY_PATH.')
         self.public_key = self.private_key.public_key()
 
     def token(
@@ -100,7 +110,7 @@ class OIDCSigner:
                     'kid': self.kid,
                     'alg': 'RS256',
                     'n': _b64url(n),
-                    'e': _burl(e),
+                    'e': _b64url(e),
                 }
             ]
         }

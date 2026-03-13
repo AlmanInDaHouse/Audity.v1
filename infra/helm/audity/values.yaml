@@ -1,0 +1,150 @@
+nameOverride: ""
+fullnameOverride: ""
+
+global:
+  namespace: audity
+  imagePullSecrets: []
+  podAnnotations: {}
+  commonLabels:
+    app.kubernetes.io/part-of: audity
+
+imageCredentials:
+  create: false
+  secretName: audity-runtime
+  data:
+    DATABASE_URL: ""
+    REDIS_URL: ""
+    TEMPORAL_SERVER: "temporal-frontend.temporal.svc.cluster.local:7233"
+    MINIO_ENDPOINT: "minio.audity.svc.cluster.local:9000"
+    MINIO_ACCESS_KEY: ""
+    MINIO_SECRET_KEY: ""
+    MINIO_BUCKET: "audity-evidence"
+    OIDC_CLIENT_SECRET: ""
+    SECRET_ENCRYPTION_KEY: ""
+    VAULT_TOKEN: ""
+    OIDC_PRIVATE_KEY_B64: ""
+
+config:
+  APP_ENV: "prod"
+  STORAGE_BACKEND: "s3"
+  WORKFLOW_MODE: "temporal"
+  TEMPORAL_NAMESPACE: "default"
+  TEMPORAL_TASK_QUEUE: "audit-run-queue"
+  CATALOG_DIR: "/workspace/catalogs"
+  OIDC_ISSUER: "https://auth.audity.example.com/realms/audity"
+  OIDC_AUDIENCE: "audity"
+  OIDC_JWKS_URL: "https://auth.audity.example.com/realms/audity/protocol/openid-connect/certs"
+  OIDC_CLIENT_ID: "audity-web"
+  API_BASE_URL: "https://audity.example.com/api"
+  SECRET_STORE_BACKEND: "vault"
+  VAULT_ADDR: "http://vault.vault.svc.cluster.local:8200"
+  VAULT_MOUNT_KV: "secret"
+  CLAMAV_HOST: "clamav.audity.svc.cluster.local"
+  CLAMAV_PORT: "3310"
+  TELEMETRY_ENABLED: "true"
+  METRICS_ENABLED: "true"
+  OTLP_ENDPOINT: "http://otel-collector.observability.svc.cluster.local:4317"
+  REPORT_PDF_ENGINE: "weasyprint"
+  REPORT_BRAND_NAME: "Audity"
+  REPORT_SUPPORT_EMAIL: "security@audity.example.com"
+  AI_EVALUATOR_ENABLED: "false"
+
+api:
+  replicaCount: 3
+  image:
+    repository: audity/api
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8000
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 75
+
+worker:
+  replicaCount: 2
+  image:
+    repository: audity/worker
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 75
+    targetMemoryUtilizationPercentage: 80
+
+frontend:
+  replicaCount: 3
+  image:
+    repository: audity/frontend
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 3000
+  resources:
+    requests:
+      cpu: "150m"
+      memory: "256Mi"
+    limits:
+      cpu: "750m"
+      memory: "768Mi"
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 65
+    targetMemoryUtilizationPercentage: 70
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: 50m
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+  hosts:
+    - host: audity.example.com
+      paths:
+        - path: /api
+          pathType: Prefix
+          service: api
+          port: 8000
+        - path: /
+          pathType: Prefix
+          service: frontend
+          port: 3000
+  tls:
+    - secretName: audity-tls
+      hosts:
+        - audity.example.com
+
+podDisruptionBudget:
+  api:
+    minAvailable: 2
+  worker:
+    minAvailable: 1
+  frontend:
+    minAvailable: 2
+
+networkPolicy:
+  enabled: true

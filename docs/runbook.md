@@ -5,7 +5,7 @@ Puertos reales extraidos de `docker-compose.yml`.
 
 | Servicio | Host -> Contenedor | Profile |
 |---|---|---|
-| Postgres | `55432 -> 5432` | default |
+| Postgres | `5433 -> 5432` | default |
 | Redis | `56379 -> 6379` | default |
 | MinIO API | `59000 -> 9000` | default |
 | MinIO Console | `59001 -> 9001` | default |
@@ -27,7 +27,7 @@ Puertos reales extraidos de `docker-compose.yml`.
 ## Credenciales Demo
 
 ### Seed users (mock login)
-No password required in MVP mock auth; login uses `email + org_id`.
+Disponible solo en `dev`, `development`, `local` y `demo_controlado`. Fuera de esos entornos `/auth/mock/login` devuelve `403`.
 
 - `admin@demo.local`
 - `auditor@demo.local`
@@ -39,6 +39,7 @@ docker compose exec api uv run python -m app.scripts.seed_data
 ```
 
 ### Infra default credentials
+Las credenciales siguientes son exclusivas de desarrollo local y no son validas para preproduccion/produccion:
 - MinIO: `minioadmin / minioadmin`
 - Postgres: `audity / audity` (DB `audity`)
 - Keycloak (`idp` profile): `admin / admin`
@@ -50,6 +51,19 @@ docker compose exec api uv run python -m app.scripts.seed_data
 curl -sS -X POST http://localhost:58000/auth/mock/login \
   -H 'content-type: application/json' \
   -d '{"email":"auditor@demo.local","org_id":"<ORG_ID>","mfa":true}'
+```
+
+En entornos de salida al mercado se debe usar OIDC/SSO o un acceso controlado equivalente. No usar `mock_login`.
+
+## CI PDF Validation
+
+Validar este punto solo en Linux con Docker daemon operativo. No marcar PDF como cerrado si falta esta ejecucion.
+
+```bash
+docker build -f backend/Dockerfile -t audity-backend-ci .
+docker build -f worker/Dockerfile -t audity-worker-ci .
+docker run --rm audity-backend-ci /opt/venv/bin/python -m pytest tests/test_reporting.py tests/test_audit_run.py tests/test_enterprise_features.py -ra
+docker run --rm audity-worker-ci /opt/venv/bin/python -c "from weasyprint import HTML; print('weasyprint-ok', HTML is not None)"
 ```
 
 ## Demo en 5 minutos

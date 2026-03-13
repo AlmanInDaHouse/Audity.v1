@@ -1,7 +1,7 @@
 # Audity Enterprise Architecture
 
 ## Scope
-Audity is a multi-tenant audit platform with enterprise controls enabled by feature flags. The stack includes FastAPI, Temporal, Postgres, Redis, MinIO, and Next.js, with optional enterprise profiles for IdP, Vault, AV, observability, backup, and WAF.
+Audity is a multi-tenant audit platform with enterprise controls enabled by feature flags. The stack includes FastAPI, Temporal, Postgres, Redis, MinIO, and Next.js, with optional enterprise profiles for IdP, Vault, AV, observability, backup, and WAF. Remote LLM orchestration is out of scope for the pre-GA runtime; the current architecture is prepared for a future local-first `knowledge_engine` replacement path.
 
 ## Core Components
 - `backend/`: FastAPI API, RBAC/ABAC authorization, SCIM server endpoints, signing, reporting, package export.
@@ -25,7 +25,8 @@ Audity is a multi-tenant audit platform with enterprise controls enabled by feat
 
 ## Secret Management
 - `SecretStore` abstraction:
-  - `env` backend for local/dev.
+  - `db` backend by default for persistent encrypted secrets.
+  - `env` backend for local/dev only.
   - `vault` backend for enterprise profile.
 - API stores references (`secret_ref`), not plaintext secrets.
 - Integration config blocks common plaintext secret keys (`token`, `password`, `secret`, `private_key`).

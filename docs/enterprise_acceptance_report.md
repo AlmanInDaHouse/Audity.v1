@@ -257,3 +257,24 @@ docker compose exec -T api uv run pytest -q tests tests_integration
   - `3 passed in 2.53s`
 - Full backend + integration:
   - `21 passed, 1 skipped`
+
+## 11) Phase 1 Backend Testing (2026-03-09)
+
+### Overview
+- Phase 1 ("World-Class" foundational upgrades) implemented the AI evaluators, WeasyPrint executive reports, and Jira outbound integrators. 
+- Local verification was performed against the `audity` dockerized infrastructure.
+
+### Resolution of Docker & OS Issues
+- Encountered Windows socket permission errors when binding the PostgreSQL container to port `55432` and `55433` which were inside restricted OS ephemeral ranges (`50000-55796`).
+- Fixed `docker-compose.yml` to map PostgreSQL to host port `5433`.
+- Fixed missing `api_token` in pytest payload `create_integration` fixture which caused the Jira webhook tests to fail gracefully but silently trap the DB exception in the Audit Log.
+
+### Reproducible Commands
+```bash
+docker compose up -d
+docker compose exec -T api uv run alembic upgrade head
+docker compose exec -T api uv run pytest tests/
+```
+
+### Evidence
+- 22 passed, 1 skipped. All Phase 1 modules successfully pass unit tests.

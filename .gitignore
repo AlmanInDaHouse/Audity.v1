@@ -15,6 +15,10 @@ node_modules/
 .next/
 out/
 *.log
+playwright-report/
+test-results/
+.tmp/
+.data/*.pem
 .DS_Store
 .vscode/
 .idea/
