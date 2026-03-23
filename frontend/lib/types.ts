@@ -20,6 +20,7 @@ export type Project = {
   name: string;
   description: string;
   criticality: 'low' | 'medium' | 'high';
+  frameworks: string[];
   created_at?: string;
 };
 
@@ -28,9 +29,14 @@ export type AuditRun = {
   org_id: string;
   project_id: string;
   status: 'queued' | 'running' | 'completed' | 'failed';
+  catalog_version_id: string | null;
   catalog_version: string;
+  frameworks_json: string[];
+  catalog_checksum: string | null;
   progress_json: Record<string, unknown>;
   summary_json: Record<string, unknown>;
+  control_posture_score: number | null;
+  control_posture_level: string | null;
   risk_score: number | null;
   risk_level: string | null;
   report_evidence_id: string | null;
@@ -98,6 +104,175 @@ export type EvidenceItem = {
   created_at?: string;
 };
 
+export type SecurityDimensionProfile = {
+  id: string;
+  org_id: string;
+  project_id: string;
+  code: string;
+  name: string;
+  description: string;
+  order_index: number;
+  is_active: boolean;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type RiskAsset = {
+  id: string;
+  org_id: string;
+  project_id: string;
+  name: string;
+  asset_type: string;
+  owner: string | null;
+  description: string;
+  criticality: 'low' | 'medium' | 'high';
+  metadata_json: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type RiskAssetRelation = {
+  id: string;
+  org_id: string;
+  project_id: string;
+  source_asset_id: string;
+  target_asset_id: string;
+  relation_type: string;
+  description: string;
+  created_at?: string;
+};
+
+export type RiskThreat = {
+  id: string;
+  org_id: string;
+  project_id: string;
+  name: string;
+  category: string;
+  description: string;
+  source: string | null;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type RiskSafeguard = {
+  id: string;
+  org_id: string;
+  project_id: string;
+  name: string;
+  safeguard_type: string;
+  description: string;
+  status: string;
+  reference: string | null;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type RiskAssessment = {
+  id: string;
+  org_id: string;
+  project_id: string;
+  name: string;
+  methodology: string;
+  status: string;
+  scope_summary: string;
+  notes: string;
+  assessed_at: string | null;
+  created_by_user_id: string | null;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type RiskScenario = {
+  id: string;
+  org_id: string;
+  project_id: string;
+  assessment_id: string;
+  asset_id: string | null;
+  threat_id: string | null;
+  safeguard_id: string | null;
+  title: string;
+  description: string;
+  likelihood: string | null;
+  impact: string | null;
+  risk_level: string | null;
+  dimension_values_json: Record<string, string>;
+  notes: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type RiskTreatmentDecision = {
+  id: string;
+  org_id: string;
+  project_id: string;
+  assessment_id: string;
+  scenario_id: string;
+  safeguard_id: string | null;
+  title: string;
+  decision: string;
+  status: string;
+  applies_to: string;
+  effectiveness_pct: number;
+  rationale: string;
+  implementation_notes: string;
+  owner_user_id: string | null;
+  decided_by_user_id: string | null;
+  due_date: string | null;
+  review_due_at: string | null;
+  metadata_json: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type RiskScenarioEvaluation = {
+  id: string;
+  org_id: string;
+  project_id: string;
+  assessment_id: string;
+  scenario_id: string;
+  version: number;
+  engine_version: string;
+  inherent_likelihood: string;
+  inherent_impact: string;
+  inherent_score: number;
+  inherent_level: string;
+  residual_likelihood: string;
+  residual_impact: string;
+  residual_score: number;
+  residual_level: string;
+  input_snapshot_json: Record<string, unknown>;
+  trace_json: Record<string, unknown>;
+  notes: string;
+  created_by_user_id: string | null;
+  created_at?: string;
+};
+
+export type RiskRegisterTraceability = {
+  evaluation_versions: number;
+  treatments_total: number;
+  implemented_treatments: number;
+  accepted_treatments: number;
+  last_evaluated_at: string | null;
+};
+
+export type RiskRegisterEntry = {
+  scenario: RiskScenario;
+  latest_evaluation: RiskScenarioEvaluation | null;
+  treatments: RiskTreatmentDecision[];
+  traceability: RiskRegisterTraceability;
+};
+
+export type RiskOverview = {
+  dimensions: SecurityDimensionProfile[];
+  assets: RiskAsset[];
+  asset_relations: RiskAssetRelation[];
+  threats: RiskThreat[];
+  safeguards: RiskSafeguard[];
+  assessments: RiskAssessment[];
+  scenarios: RiskScenario[];
+  risk_register: RiskRegisterEntry[];
+};
+
 export type FeatureFlags = {
   enterprise_features_enabled: boolean;
   feature_auth_enterprise: boolean;
@@ -114,6 +289,7 @@ export type FeatureFlags = {
 export type PricingPlan = {
   org_id: string;
   plan_code: string;
+  max_projects: number;
   max_assets: number;
   max_upload_bytes: number;
   modules_json: Record<string, boolean>;
@@ -140,6 +316,8 @@ export type DashboardRecentRun = {
   project_id: string;
   project_name: string;
   status: AuditRun['status'];
+  control_posture_score: number | null;
+  control_posture_level: string | null;
   risk_score: number | null;
   risk_level: string | null;
   updated_at: string;
@@ -190,6 +368,9 @@ export type OrganizationDashboard = {
   };
   plan: {
     plan_code: string;
+    max_projects: number;
+    projects_used: number;
+    project_usage_pct: number;
     max_assets: number;
     assets_used: number;
     asset_usage_pct: number;

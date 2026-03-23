@@ -67,7 +67,7 @@ export default function ReportsPage() {
                   <tr>
                     <th>Project</th>
                     <th>Run</th>
-                    <th>Risk</th>
+                    <th>Control posture score</th>
                     <th>Generated</th>
                     <th>Actions</th>
                   </tr>
@@ -77,7 +77,7 @@ export default function ReportsPage() {
                     <tr key={row.run.id}>
                       <td>{row.project.name}</td>
                       <td>{row.run.id.slice(0, 10)}</td>
-                      <td>{formatRisk(row.run.risk_score)}</td>
+                      <td>{formatRisk(row.run.control_posture_score ?? row.run.risk_score)}</td>
                       <td>{formatDateTime(row.run.updated_at)}</td>
                       <td>
                         <button

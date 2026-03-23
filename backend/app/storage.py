@@ -3,12 +3,15 @@ from __future__ import annotations
 import hashlib
 import io
 from dataclasses import dataclass
+from typing import BinaryIO
 
 import boto3
 from botocore.client import BaseClient
 from botocore.exceptions import ClientError
 
 from app.config import get_settings
+
+STREAM_CHUNK_SIZE = 1024 * 1024
 
 
 @dataclass
@@ -25,6 +28,12 @@ class MemoryObjectStore:
         return
 
     async def put_bytes(self, key: str, data: bytes, content_type: str) -> StoredObject:
+        self._objects[key] = data
+        return StoredObject(key=key, sha256=hashlib.sha256(data).hexdigest(), size=len(data))
+
+    async def put_fileobj(self, key: str, fileobj: BinaryIO, content_type: str) -> StoredObject:
+        fileobj.seek(0)
+        data = fileobj.read()
         self._objects[key] = data
         return StoredObject(key=key, sha256=hashlib.sha256(data).hexdigest(), size=len(data))
 
@@ -58,6 +67,17 @@ class S3ObjectStore:
     async def put_bytes(self, key: str, data: bytes, content_type: str) -> StoredObject:
         self.client.upload_fileobj(io.BytesIO(data), self.bucket, key, ExtraArgs={'ContentType': content_type})
         return StoredObject(key=key, sha256=hashlib.sha256(data).hexdigest(), size=len(data))
+
+    async def put_fileobj(self, key: str, fileobj: BinaryIO, content_type: str) -> StoredObject:
+        fileobj.seek(0)
+        digest = hashlib.sha256()
+        size = 0
+        while chunk := fileobj.read(STREAM_CHUNK_SIZE):
+            digest.update(chunk)
+            size += len(chunk)
+        fileobj.seek(0)
+        self.client.upload_fileobj(fileobj, self.bucket, key, ExtraArgs={'ContentType': content_type})
+        return StoredObject(key=key, sha256=digest.hexdigest(), size=size)
 
     async def get_bytes(self, key: str) -> bytes:
         with io.BytesIO() as output:

@@ -31,7 +31,7 @@ export default function LoginPage() {
   const { pushToast } = useToast();
 
   const [orgId, setOrgId] = useState('');
-  const [userEmail, setUserEmail] = useState(DEMO_USERS[1].email);
+  const [userEmail, setUserEmail] = useState(DEMO_USERS[0].email);
   const [mfa, setMfa] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');

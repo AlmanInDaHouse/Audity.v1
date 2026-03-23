@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,6 +44,7 @@ from app.signing import verify_bundle
 from app.storage import get_object_store
 
 router = APIRouter()
+DEFAULT_MAX_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024
 FEATURE_FLAG_KEYS = (
     'enterprise_features_enabled',
     'feature_auth_enterprise',
@@ -97,7 +98,7 @@ class RolePermissionCreate(BaseModel):
 
 class PolicyUpdateRequest(BaseModel):
     require_mfa_sensitive: bool = False
-    max_upload_bytes: int = Field(default=20 * 1024 * 1024, ge=1024 * 1024, le=1024 * 1024 * 1024)
+    max_upload_bytes: int = Field(default=DEFAULT_MAX_UPLOAD_BYTES, ge=1024 * 1024, le=DEFAULT_MAX_UPLOAD_BYTES)
     retention_days: int = Field(default=365, ge=1, le=3650)
 
 
@@ -117,9 +118,20 @@ class CommentCreateRequest(BaseModel):
 
 class PricingPlanRequest(BaseModel):
     plan_code: str = Field(min_length=2, max_length=64)
-    max_assets: int = Field(ge=1, le=1_000_000)
-    max_upload_bytes: int = Field(ge=1024 * 1024, le=1024 * 1024 * 1024)
+    max_assets: int | None = Field(default=None, ge=1, le=1_000_000)
+    max_projects: int | None = Field(default=None, ge=1, le=1_000_000)
+    max_upload_bytes: int = Field(ge=1024 * 1024, le=DEFAULT_MAX_UPLOAD_BYTES)
     modules_json: dict[str, bool] = Field(default_factory=dict)
+
+    @model_validator(mode='after')
+    def validate_limits(self) -> 'PricingPlanRequest':
+        if self.max_projects is None and self.max_assets is None:
+            raise ValueError('max_projects or max_assets is required')
+        if self.max_projects is None:
+            self.max_projects = self.max_assets
+        if self.max_assets is None:
+            self.max_assets = self.max_projects
+        return self
 
 
 class DPAStatusUpdateRequest(BaseModel):
@@ -304,7 +316,7 @@ async def get_security_policy(
         return {
             'org_id': org_id,
             'require_mfa_sensitive': False,
-            'max_upload_bytes': 20 * 1024 * 1024,
+            'max_upload_bytes': DEFAULT_MAX_UPLOAD_BYTES,
             'retention_days': 365,
         }
     return {
@@ -822,13 +834,16 @@ async def upsert_pricing_plan(
         plan = PricingPlan(org_id=org_id)
         db.add(plan)
     plan.plan_code = payload.plan_code
-    plan.max_assets = payload.max_assets
+    max_projects = payload.max_projects if payload.max_projects is not None else payload.max_assets
+    plan.max_projects = max_projects
+    plan.max_assets = max_projects
     plan.max_upload_bytes = payload.max_upload_bytes
     plan.modules_json = payload.modules_json
     await db.commit()
     return {
         'org_id': org_id,
         'plan_code': plan.plan_code,
+        'max_projects': plan.max_projects,
         'max_assets': plan.max_assets,
         'max_upload_bytes': plan.max_upload_bytes,
         'modules_json': plan.modules_json,
@@ -848,13 +863,15 @@ async def get_pricing_plan(
         return {
             'org_id': org_id,
             'plan_code': 'starter',
+            'max_projects': 50,
             'max_assets': 50,
-            'max_upload_bytes': 20 * 1024 * 1024,
+            'max_upload_bytes': DEFAULT_MAX_UPLOAD_BYTES,
             'modules_json': {},
         }
     return {
         'org_id': org_id,
         'plan_code': plan.plan_code,
+        'max_projects': plan.max_projects or plan.max_assets,
         'max_assets': plan.max_assets,
         'max_upload_bytes': plan.max_upload_bytes,
         'modules_json': plan.modules_json,

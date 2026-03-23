@@ -72,7 +72,7 @@ services:
       - .env
     environment:
       APP_ENV: dev
-      PYTHONPATH: /workspace
+      PYTHONPATH: /workspace/backend
       DATABASE_URL: postgresql+asyncpg://audity:audity@postgres:5432/audity
       REDIS_URL: redis://redis:6379/0
       TEMPORAL_SERVER: temporal:7233
@@ -133,7 +133,7 @@ services:
       - .env
     environment:
       APP_ENV: dev
-      PYTHONPATH: /workspace
+      PYTHONPATH: /workspace/backend
       DATABASE_URL: postgresql+asyncpg://audity:audity@postgres:5432/audity
       REDIS_URL: redis://redis:6379/0
       TEMPORAL_SERVER: temporal:7233

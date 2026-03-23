@@ -55,7 +55,7 @@ export default function EnterprisePage() {
       .then(([featurePayload, planPayload, legalPayload]) => {
         setFeatures(featurePayload);
         setPlanCode(planPayload.plan_code);
-        setMaxAssets(planPayload.max_assets);
+        setMaxAssets(planPayload.max_projects ?? planPayload.max_assets);
         setMaxUploadMb(Math.floor(planPayload.max_upload_bytes / 1024 / 1024));
         setModules(JSON.stringify(planPayload.modules_json, null, 2));
         setLegal(legalPayload);
@@ -114,6 +114,7 @@ export default function EnterprisePage() {
         method: 'PUT',
         body: JSON.stringify({
           plan_code: planCode,
+          max_projects: maxAssets,
           max_assets: maxAssets,
           max_upload_bytes: maxUploadMb * 1024 * 1024,
           modules_json: modulesJson,
@@ -248,7 +249,7 @@ export default function EnterprisePage() {
                 </div>
                 <div className="field">
                   <label className="label" htmlFor="max-assets">
-                    Max assets
+                    Max projects
                   </label>
                   <input
                     id="max-assets"

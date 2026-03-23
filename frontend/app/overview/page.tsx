@@ -157,13 +157,16 @@ export default function OverviewPage() {
                 <div className="progress-panel">
                   <div className="progress-labels">
                     <span>Plan {dashboard.plan.plan_code}</span>
-                    <strong>{formatPercent(dashboard.plan.asset_usage_pct)}</strong>
+                    <strong>{formatPercent(dashboard.plan.project_usage_pct ?? dashboard.plan.asset_usage_pct)}</strong>
                   </div>
                   <div className="progress-track">
-                    <div className="progress-fill" style={{ width: `${Math.min(dashboard.plan.asset_usage_pct, 100)}%` }} />
+                    <div
+                      className="progress-fill"
+                      style={{ width: `${Math.min(dashboard.plan.project_usage_pct ?? dashboard.plan.asset_usage_pct, 100)}%` }}
+                    />
                   </div>
                   <p className="hint">
-                    {dashboard.plan.assets_used} de {dashboard.plan.max_assets} activos usados
+                    {dashboard.plan.projects_used ?? dashboard.plan.assets_used} de {dashboard.plan.max_projects ?? dashboard.plan.max_assets} proyectos usados
                   </p>
                 </div>
                 <div className="actions">
@@ -184,7 +187,7 @@ export default function OverviewPage() {
               <div className="section-head">
                 <div>
                   <h2 className="card-title">Recent audit runs</h2>
-                  <p className="card-subtitle">Actividad reciente con señal de riesgo.</p>
+                  <p className="card-subtitle">Actividad reciente con postura de control. El riesgo formal vive en el registro por proyecto.</p>
                 </div>
               </div>
               {dashboard.recent_runs.length === 0 && (
@@ -200,7 +203,7 @@ export default function OverviewPage() {
                       <tr>
                         <th>Project</th>
                         <th>Status</th>
-                        <th>Risk</th>
+                        <th>Control posture score</th>
                         <th>Updated</th>
                       </tr>
                     </thead>
@@ -214,7 +217,7 @@ export default function OverviewPage() {
                             <p className="hint">{compactId(run.id)}</p>
                           </td>
                           <td><StatusBadge value={run.status} /></td>
-                          <td>{formatRisk(run.risk_score)}</td>
+                          <td>{formatRisk(run.control_posture_score ?? run.risk_score)}</td>
                           <td>{formatDateTime(run.updated_at)}</td>
                         </tr>
                       ))}

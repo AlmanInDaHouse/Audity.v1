@@ -24,7 +24,9 @@ os.environ['DATABASE_URL'] = f'sqlite+aiosqlite:///{TEST_DB_PATH}'
 
 from app.db import Base, SessionLocal, engine
 from app.main import app
-from app.models import CriticalityEnum, Membership, Organization, Project, RoleEnum, User
+from app.catalog_engine import build_catalog_bundle, default_framework_scope
+from app.models import CatalogVersion, CriticalityEnum, Membership, Organization, Project, RoleEnum, User
+from app.risk.service import ensure_default_dimension_profiles
 
 
 @pytest.fixture(scope='session', autouse=True)
@@ -44,6 +46,15 @@ def clean_db() -> None:
             tables = [
                 'audit_packages',
                 'external_tickets',
+                'risk_scenario_evaluations',
+                'risk_treatment_decisions',
+                'risk_scenarios',
+                'risk_asset_relations',
+                'risk_assessments',
+                'risk_safeguards',
+                'risk_threats',
+                'risk_assets',
+                'security_dimension_profiles',
                 'pricing_plans',
                 'outbound_integrations',
                 'remediation_comments',
@@ -61,6 +72,7 @@ def clean_db() -> None:
                 'evidence_items',
                 'integrations',
                 'projects',
+                'catalog_versions',
                 'control_catalogs',
                 'memberships',
                 'users',
@@ -99,6 +111,19 @@ def seeded_ids() -> dict[str, Any]:
                     Membership(org_id=org.id, user_id=viewer.id, role=RoleEnum.client_viewer),
                 ]
             )
+            bundle = build_catalog_bundle(default_framework_scope(), version='v1')
+            db.add(
+                CatalogVersion(
+                    org_id=None,
+                    name='core-catalog',
+                    version='v1',
+                    status='published',
+                    checksum=bundle['checksum'],
+                    frameworks_json=bundle['frameworks'],
+                    bundle_json=bundle,
+                    created_by_user_id=None,
+                )
+            )
 
             project = Project(
                 org_id=org.id,
@@ -107,6 +132,8 @@ def seeded_ids() -> dict[str, Any]:
                 criticality=CriticalityEnum.high,
             )
             db.add(project)
+            await db.flush()
+            await ensure_default_dimension_profiles(db, org_id=org.id, project_id=project.id)
             await db.commit()
 
             return {

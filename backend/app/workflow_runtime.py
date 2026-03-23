@@ -11,7 +11,7 @@ import httpx
 from sqlalchemy import delete, select
 
 from app.audit_log import append_audit_log
-from app.catalog_engine import load_controls
+from app.catalog_engine import load_controls, load_controls_from_snapshot
 from app.connectors.jira import sync_finding_to_jira
 from app.config import get_settings
 from app.db import SessionLocal
@@ -278,7 +278,15 @@ def _derive_remediation(results: list[ControlResult]) -> list[dict[str, str]]:
 
 async def evaluate_controls_activity(input_data: AuditWorkflowInput, evidence: dict[str, Any]) -> dict[str, Any]:
     await _update_run_progress(input_data.audit_run_id, org_id=input_data.org_id, stage='evaluate_controls')
-    controls = load_controls()
+    async with SessionLocal() as db:
+        await set_current_org(db, input_data.org_id)
+        run = await db.get(AuditRun, input_data.audit_run_id)
+        if run is None:
+            raise ValueError('AuditRun not found')
+        snapshot = run.catalog_snapshot_json
+        if run.catalog_version_id is not None and snapshot is None:
+            raise ValueError('Published catalog-backed run is missing catalog snapshot')
+    controls = load_controls_from_snapshot(snapshot) if snapshot is not None else load_controls()
     results = evaluate_controls(controls, evidence)
     return {
         'results': [r.__dict__ for r in results],
@@ -462,6 +470,8 @@ async def persist_results_activity(
             'failing_controls': len(report_meta['findings']),
             'evidence': evidence,
         }
+        run.control_posture_score = risk['risk_score']
+        run.control_posture_level = risk['risk_level']
         run.risk_score = risk['risk_score']
         run.risk_level = risk['risk_level']
         run.report_evidence_id = report_meta['report_evidence_id']
@@ -476,7 +486,12 @@ async def persist_results_activity(
             action='audit_run.completed',
             entity_type='audit_run',
             entity_id=input_data.audit_run_id,
-            payload={'risk_score': risk['risk_score'], 'risk_level': risk['risk_level']},
+            payload={
+                'control_posture_score': risk['risk_score'],
+                'control_posture_level': risk['risk_level'],
+                'risk_score': risk['risk_score'],
+                'risk_level': risk['risk_level'],
+            },
         )
         project = await db.get(Project, input_data.project_id)
         outbound_integrations = (
@@ -517,6 +532,8 @@ async def persist_results_activity(
             'total_controls': control_eval['total_controls'],
             'failing_controls': len(report_meta['findings']),
         },
+        'control_posture_score': risk['risk_score'],
+        'control_posture_level': risk['risk_level'],
         'risk_score': risk['risk_score'],
         'report_evidence_id': report_meta['report_evidence_id'],
     }

@@ -125,7 +125,7 @@ export default function RunDetailPage() {
       <header className="page-header">
         <div>
           <h1 className="page-title">Audit Run</h1>
-          <p className="page-subtitle">Live execution view with polling and run artifacts.</p>
+          <p className="page-subtitle">Live execution view with polling, run artifacts and control posture for this execution.</p>
         </div>
         <div className="actions">
           <button type="button" className="button button-ghost" onClick={() => router.push(`/projects/${projectId}`)}>
@@ -151,13 +151,20 @@ export default function RunDetailPage() {
                 <p className="kpi-value"><StatusBadge value={run.status} /></p>
               </div>
               <div>
-                <p className="card-subtitle">Risk score</p>
-                <p className="kpi-value">{formatRisk(run.risk_score)}</p>
+                <p className="card-subtitle">Control posture score</p>
+                <p className="kpi-value">{formatRisk(run.control_posture_score ?? run.risk_score)}</p>
+                <p className="hint">This is run posture, not the formal risk register.</p>
               </div>
               <div>
                 <p className="card-subtitle">Last update</p>
                 <p className="kpi-value" style={{ fontSize: 18 }}>{formatDateTime(run.updated_at)}</p>
               </div>
+            </div>
+            <div className="actions" style={{ marginTop: 12 }}>
+              <span className="badge badge-completed">Scope: {run.frameworks_json.join(', ')}</span>
+              <span className="badge badge-completed">Catalog version: {run.catalog_version}</span>
+              {run.catalog_version_id && <span className="badge badge-queued">Catalog id: {run.catalog_version_id.slice(0, 12)}</span>}
+              {run.catalog_checksum && <span className="badge badge-queued">Catalog checksum: {run.catalog_checksum.slice(0, 12)}</span>}
             </div>
           </article>
 

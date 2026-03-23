@@ -4,10 +4,13 @@ import enum
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.catalog_engine import default_framework_scope
 from app.db import Base
+
+DEFAULT_MAX_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024
 
 
 def utc_now() -> datetime:
@@ -100,6 +103,7 @@ class Project(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(Text, default='')
     criticality: Mapped[CriticalityEnum] = mapped_column(Enum(CriticalityEnum), default=CriticalityEnum.medium)
+    frameworks_json: Mapped[list] = mapped_column(JSON, default=default_framework_scope)
     tags_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
@@ -132,6 +136,23 @@ class ControlCatalog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class CatalogVersion(Base):
+    __tablename__ = 'catalog_versions'
+    __table_args__ = (UniqueConstraint('org_id', 'name', 'version', name='uq_catalog_versions_scope_name_version'),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    org_id: Mapped[str | None] = mapped_column(String(36), ForeignKey('organizations.id', ondelete='CASCADE'), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    version: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default='draft')
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    frameworks_json: Mapped[list] = mapped_column(JSON, default=default_framework_scope)
+    bundle_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_by_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class AuditRun(Base):
     __tablename__ = 'audit_runs'
 
@@ -139,10 +160,18 @@ class AuditRun(Base):
     org_id: Mapped[str] = mapped_column(String(36), ForeignKey('organizations.id', ondelete='CASCADE'), index=True)
     project_id: Mapped[str] = mapped_column(String(36), ForeignKey('projects.id', ondelete='CASCADE'), index=True)
     triggered_by_user_id: Mapped[str] = mapped_column(String(36), ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    catalog_version_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey('catalog_versions.id', ondelete='SET NULL'), nullable=True, index=True
+    )
     status: Mapped[AuditStatusEnum] = mapped_column(Enum(AuditStatusEnum), default=AuditStatusEnum.queued, index=True)
     catalog_version: Mapped[str] = mapped_column(String(64), default='v1')
+    frameworks_json: Mapped[list] = mapped_column(JSON, default=default_framework_scope)
+    catalog_checksum: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    catalog_snapshot_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     progress_json: Mapped[dict] = mapped_column(JSON, default=dict)
     summary_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    control_posture_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    control_posture_level: Mapped[str | None] = mapped_column(String(16), nullable=True)
     risk_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     risk_level: Mapped[str | None] = mapped_column(String(16), nullable=True)
     report_evidence_id: Mapped[str | None] = mapped_column(String(36), ForeignKey('evidence_items.id', ondelete='SET NULL'), nullable=True)
@@ -247,7 +276,7 @@ class OrgSecurityPolicy(Base):
 
     org_id: Mapped[str] = mapped_column(String(36), ForeignKey('organizations.id', ondelete='CASCADE'), primary_key=True)
     require_mfa_sensitive: Mapped[bool] = mapped_column(Boolean, default=False)
-    max_upload_bytes: Mapped[int] = mapped_column(Integer, default=20 * 1024 * 1024)
+    max_upload_bytes: Mapped[int] = mapped_column(BigInteger, default=DEFAULT_MAX_UPLOAD_BYTES)
     retention_days: Mapped[int] = mapped_column(Integer, default=365)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
@@ -333,7 +362,8 @@ class PricingPlan(Base):
     org_id: Mapped[str] = mapped_column(String(36), ForeignKey('organizations.id', ondelete='CASCADE'), primary_key=True)
     plan_code: Mapped[str] = mapped_column(String(64), default='starter')
     max_assets: Mapped[int] = mapped_column(Integer, default=50)
-    max_upload_bytes: Mapped[int] = mapped_column(Integer, default=20 * 1024 * 1024)
+    max_projects: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_upload_bytes: Mapped[int] = mapped_column(BigInteger, default=DEFAULT_MAX_UPLOAD_BYTES)
     modules_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)

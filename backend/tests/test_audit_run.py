@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from app import main as main_module
+from app.catalog_engine import normalize_framework_scope
 from app.package_export import HTML
 from app.temporal_workflow import AuditRunWorkflowInput
 from app.workflow_runtime import AuditWorkflowInput, execute_inline
@@ -49,6 +50,11 @@ def test_create_audit_run_happy_path(client, seeded_ids, monkeypatch):
     )
     assert run_response.status_code == 200, run_response.text
     run_data = run_response.json()
+    assert run_data['catalog_version_id'] is not None
+    assert run_data['frameworks_json'] == normalize_framework_scope(['ISO27001', 'ENS', 'RGPD'])
+    assert len(run_data['catalog_checksum']) == 64
+    assert run_data['control_posture_score'] is None
+    assert run_data['risk_score'] is None
 
     get_run = client.get(
         f"/projects/{seeded_ids['project_id']}/audit-runs/{run_data['id']}",
@@ -66,6 +72,8 @@ def test_create_audit_run_happy_path(client, seeded_ids, monkeypatch):
 
     updated_run = get_run.json()
     assert updated_run['report_evidence_id']
+    assert updated_run['control_posture_score'] == updated_run['risk_score']
+    assert updated_run['control_posture_level'] == updated_run['risk_level']
     evidence_summary = updated_run['summary_json']['evidence']
     assert evidence_summary['github']['mode'] == 'unconfigured'
     assert evidence_summary['github']['repo_count'] == 0

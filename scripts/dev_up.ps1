@@ -3,6 +3,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 
 if (-not (Test-Path '.env')) {
     if ($UseCiEnv -and (Test-Path '.env.ci')) {

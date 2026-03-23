@@ -1,5 +1,6 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from app.catalog_engine import default_framework_scope, normalize_framework_scope
 from app.models import AuditStatusEnum, CriticalityEnum, FindingStatusEnum, ResultEnum, RoleEnum, SeverityEnum
 
 
@@ -57,12 +58,26 @@ class ProjectCreate(BaseModel):
     name: str = Field(min_length=2, max_length=255)
     description: str = ''
     criticality: CriticalityEnum = CriticalityEnum.medium
+    frameworks: list[str] = Field(default_factory=default_framework_scope)
+
+    @field_validator('frameworks')
+    @classmethod
+    def validate_frameworks(cls, value: list[str]) -> list[str]:
+        return normalize_framework_scope(value)
 
 
 class ProjectUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
     criticality: CriticalityEnum | None = None
+    frameworks: list[str] | None = None
+
+    @field_validator('frameworks')
+    @classmethod
+    def validate_frameworks(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        return normalize_framework_scope(value)
 
 
 class ProjectOut(BaseModel):
@@ -71,6 +86,7 @@ class ProjectOut(BaseModel):
     name: str
     description: str
     criticality: CriticalityEnum
+    frameworks: list[str]
 
 
 class IntegrationCreate(BaseModel):
@@ -119,6 +135,31 @@ class ControlCatalogOut(BaseModel):
     is_global: bool
 
 
+class CatalogVersionCreate(BaseModel):
+    name: str = Field(default='core-catalog', min_length=2, max_length=255)
+    version: str = Field(default='v1', min_length=1, max_length=64)
+    frameworks: list[str] = Field(default_factory=default_framework_scope)
+    bundle_json: dict | None = None
+
+    @field_validator('frameworks')
+    @classmethod
+    def validate_frameworks(cls, value: list[str]) -> list[str]:
+        return normalize_framework_scope(value)
+
+
+class CatalogVersionOut(BaseModel):
+    id: str
+    org_id: str | None
+    name: str
+    version: str
+    status: str
+    checksum: str
+    frameworks: list[str]
+    created_by_user_id: str | None
+    published_at: str | None
+    created_at: str
+
+
 class AuditRunCreate(BaseModel):
     catalog_version: str = 'v1'
 
@@ -128,9 +169,14 @@ class AuditRunOut(BaseModel):
     org_id: str
     project_id: str
     status: AuditStatusEnum
+    catalog_version_id: str | None
     catalog_version: str
+    frameworks_json: list[str]
+    catalog_checksum: str | None
     progress_json: dict
     summary_json: dict
+    control_posture_score: float | None
+    control_posture_level: str | None
     risk_score: float | None
     risk_level: str | None
     report_evidence_id: str | None

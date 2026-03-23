@@ -119,7 +119,7 @@ def upgrade() -> None:
         'org_security_policies',
         sa.Column('org_id', sa.String(36), sa.ForeignKey('organizations.id', ondelete='CASCADE'), primary_key=True),
         sa.Column('require_mfa_sensitive', sa.Boolean(), nullable=False, server_default=sa.false()),
-        sa.Column('max_upload_bytes', sa.Integer(), nullable=False, server_default=str(20 * 1024 * 1024)),
+        sa.Column('max_upload_bytes', sa.BigInteger(), nullable=False, server_default=str(20 * 1024 * 1024 * 1024)),
         sa.Column('retention_days', sa.Integer(), nullable=False, server_default='365'),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
@@ -219,7 +219,7 @@ def upgrade() -> None:
         sa.Column('org_id', sa.String(36), sa.ForeignKey('organizations.id', ondelete='CASCADE'), primary_key=True),
         sa.Column('plan_code', sa.String(64), nullable=False, server_default='starter'),
         sa.Column('max_assets', sa.Integer(), nullable=False, server_default='50'),
-        sa.Column('max_upload_bytes', sa.Integer(), nullable=False, server_default=str(20 * 1024 * 1024)),
+        sa.Column('max_upload_bytes', sa.BigInteger(), nullable=False, server_default=str(20 * 1024 * 1024 * 1024)),
         sa.Column('modules_json', sa.JSON(), nullable=False, server_default=sa.text("'{}'::json")),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
@@ -244,7 +244,7 @@ def upgrade() -> None:
     op.execute(
         """
         INSERT INTO org_security_policies (org_id, require_mfa_sensitive, max_upload_bytes, retention_days, created_at, updated_at)
-        SELECT id, false, 20971520, 365, now(), now()
+        SELECT id, false, 21474836480, 365, now(), now()
         FROM organizations
         ON CONFLICT (org_id) DO NOTHING
         """
@@ -252,7 +252,7 @@ def upgrade() -> None:
     op.execute(
         """
         INSERT INTO pricing_plans (org_id, plan_code, max_assets, max_upload_bytes, modules_json, created_at, updated_at)
-        SELECT id, 'starter', 50, 20971520, '{}'::json, now(), now()
+        SELECT id, 'starter', 50, 21474836480, '{}'::json, now(), now()
         FROM organizations
         ON CONFLICT (org_id) DO NOTHING
         """

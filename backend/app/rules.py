@@ -82,6 +82,48 @@ EVALUATORS = {
     'fallback': _eval_fallback,
 }
 
+# why this: the published catalog bundle must reference evaluator keys that are
+# resolvable at runtime, even when they still fall back to manual review.
+for _fallback_key in (
+    'policy_governance',
+    'governance_roles',
+    'segregation_of_duties',
+    'threat_intelligence',
+    'project_security_governance',
+    'asset_inventory',
+    'acceptable_use_policy',
+    'information_classification',
+    'information_labelling',
+    'secure_information_transfer',
+    'access_control_governance',
+    'identity_lifecycle',
+    'authentication_secret_management',
+    'access_rights_review',
+    'supplier_security_governance',
+    'supplier_agreements',
+    'cloud_security_governance',
+    'incident_response_preparedness',
+    'incident_event_assessment',
+    'incident_response_execution',
+    'ict_continuity',
+    'legal_requirements_register',
+    'intellectual_property_controls',
+    'privacy_operations',
+    'security_awareness_program',
+    'disciplinary_process',
+    'offboarding_controls',
+    'vulnerability_management',
+    'configuration_management',
+    'backup_and_restore',
+    'logging_controls',
+    'monitoring_activities',
+    'cryptography_governance',
+    'change_management',
+    'test_data_protection',
+    'audit_testing_safeguards',
+):
+    EVALUATORS.setdefault(_fallback_key, _eval_fallback)
+
 
 def _assessment_index(evidence: dict[str, Any]) -> dict[str, dict[str, Any]]:
     assessments = evidence.get('ai_assessment', {}).get('assessments', [])

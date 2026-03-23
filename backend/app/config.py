@@ -5,6 +5,8 @@ from urllib.parse import urlparse
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+DEFAULT_MAX_UPLOAD_MB = 20 * 1024
+
 
 def _default_catalog_dir() -> str:
     candidate = Path(__file__).resolve().parents[2] / 'catalogs'
@@ -47,7 +49,7 @@ class Settings(BaseSettings):
     oidc_private_key_path: str = _default_oidc_key_path()
 
     api_base_url: str = 'http://localhost:8000'
-    cors_allowed_origins: str = 'http://localhost:3000,http://127.0.0.1:3000,https://localhost:5443,https://127.0.0.1:5443'
+    cors_allowed_origins: str = 'http://localhost:3000,http://127.0.0.1:3000,http://localhost:53000,http://127.0.0.1:53000,http://localhost:5080,http://127.0.0.1:5080,https://localhost:5443,https://127.0.0.1:5443'
     rate_limit_per_minute: int = Field(default=120, ge=10, le=5000)
     sensitive_rate_limit_per_minute: int = Field(default=20, ge=1, le=2000)
 
@@ -96,7 +98,7 @@ class Settings(BaseSettings):
     vault_mount_transit: str = 'transit'
 
     # Upload controls
-    upload_default_max_mb: int = Field(default=20, ge=1, le=1024)
+    upload_default_max_mb: int = Field(default=DEFAULT_MAX_UPLOAD_MB, ge=1, le=DEFAULT_MAX_UPLOAD_MB)
     clamav_host: str = 'clamav'
     clamav_port: int = 3310
     clamav_timeout_seconds: int = Field(default=10, ge=1, le=120)

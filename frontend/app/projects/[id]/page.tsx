@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 
 import { Breadcrumbs } from '@/components/breadcrumbs';
 import { ConfirmDialog } from '@/components/confirm-dialog';
@@ -23,10 +23,11 @@ import type {
   PaginatedResponse,
   PricingPlan,
   Project,
+  RiskOverview,
   RemediationTask,
 } from '@/lib/types';
 
-type ProjectTab = 'overview' | 'runs' | 'findings' | 'remediation' | 'evidence' | 'integrations';
+type ProjectTab = 'overview' | 'runs' | 'findings' | 'remediation' | 'risk' | 'evidence' | 'integrations';
 
 const RUNS_PAGE_SIZE = 10;
 const EVIDENCE_PAGE_SIZE = 10;
@@ -42,6 +43,7 @@ export default function ProjectDetailPage() {
   const canLaunchAudit = hasRole(session.role, ['org_admin', 'auditor']);
   const canUploadEvidence = hasRole(session.role, ['org_admin', 'auditor']);
   const canManageIntegrations = hasRole(session.role, ['org_admin', 'auditor']);
+  const canManageRisk = hasRole(session.role, ['org_admin', 'auditor']);
 
   const tabFromQuery = searchParams.get('tab');
   const tab: ProjectTab =
@@ -49,6 +51,7 @@ export default function ProjectDetailPage() {
     tabFromQuery === 'runs' ||
     tabFromQuery === 'findings' ||
     tabFromQuery === 'remediation' ||
+    tabFromQuery === 'risk' ||
     tabFromQuery === 'evidence' ||
     tabFromQuery === 'integrations'
       ? tabFromQuery
@@ -63,6 +66,9 @@ export default function ProjectDetailPage() {
   const [selectedRunId, setSelectedRunId] = useState('');
   const [findings, setFindings] = useState<Finding[]>([]);
   const [tasks, setTasks] = useState<RemediationTask[]>([]);
+  const [riskData, setRiskData] = useState<RiskOverview | null>(null);
+  const [riskLoading, setRiskLoading] = useState(false);
+  const [riskError, setRiskError] = useState('');
   const [evidencePage, setEvidencePage] = useState(1);
   const [evidenceData, setEvidenceData] = useState<PaginatedResponse<EvidenceItem>>({
     items: [],
@@ -83,10 +89,32 @@ export default function ProjectDetailPage() {
   const [createIntegrationBusy, setCreateIntegrationBusy] = useState(false);
   const [integrationToDelete, setIntegrationToDelete] = useState<Integration | null>(null);
 
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadFiles, setUploadFiles] = useState<File[]>([]);
   const [uploadMetadata, setUploadMetadata] = useState('{\n  "source": "manual"\n}');
   const [uploadItemType, setUploadItemType] = useState('manual_upload');
   const [uploadBusy, setUploadBusy] = useState(false);
+  const fileUploadInputRef = useRef<HTMLInputElement | null>(null);
+  const folderUploadInputRef = useRef<HTMLInputElement | null>(null);
+  const [riskAssetName, setRiskAssetName] = useState('');
+  const [riskAssetType, setRiskAssetType] = useState('information');
+  const [riskThreatName, setRiskThreatName] = useState('');
+  const [riskThreatCategory, setRiskThreatCategory] = useState('generic');
+  const [riskSafeguardName, setRiskSafeguardName] = useState('');
+  const [riskSafeguardStatus, setRiskSafeguardStatus] = useState('planned');
+  const [riskAssessmentName, setRiskAssessmentName] = useState('');
+  const [riskRelationSourceId, setRiskRelationSourceId] = useState('');
+  const [riskRelationTargetId, setRiskRelationTargetId] = useState('');
+  const [riskRelationType, setRiskRelationType] = useState('depends_on');
+  const [riskScenarioTitle, setRiskScenarioTitle] = useState('');
+  const [riskScenarioAssessmentId, setRiskScenarioAssessmentId] = useState('');
+  const [riskScenarioAssetId, setRiskScenarioAssetId] = useState('');
+  const [riskScenarioThreatId, setRiskScenarioThreatId] = useState('');
+  const [riskScenarioSafeguardId, setRiskScenarioSafeguardId] = useState('');
+  const [riskScenarioLikelihood, setRiskScenarioLikelihood] = useState('medium');
+  const [riskScenarioImpact, setRiskScenarioImpact] = useState('medium');
+  const [riskScenarioLevel, setRiskScenarioLevel] = useState('medium');
+  const [riskScenarioDimensions, setRiskScenarioDimensions] = useState('{\n  "C": "medium"\n}');
+  const [riskBusy, setRiskBusy] = useState(false);
 
   const selectedRun = useMemo(() => runsData.items.find((item) => item.id === selectedRunId) || runsData.items[0] || null, [runsData.items, selectedRunId]);
 
@@ -146,6 +174,21 @@ export default function ProjectDetailPage() {
     setIntegrations(integrationPayload);
   }
 
+  async function loadRisk() {
+    setRiskLoading(true);
+    try {
+      const riskPayload = await apiJson<RiskOverview>(`/projects/${projectId}/risk`);
+      setRiskData(riskPayload);
+      setRiskError('');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to load risk';
+      setRiskError(message);
+      throw err;
+    } finally {
+      setRiskLoading(false);
+    }
+  }
+
   useEffect(() => {
     if (!projectId || !session.orgId) {
       return;
@@ -187,6 +230,22 @@ export default function ProjectDetailPage() {
   }, [projectId, session.orgId, runsPage, evidencePage, pushToast]);
 
   useEffect(() => {
+    if (!projectId || !session.orgId || tab !== 'risk') {
+      return;
+    }
+    let cancelled = false;
+    loadRisk().catch((err) => {
+      const message = err instanceof Error ? err.message : 'Failed to load risk';
+      if (!cancelled) {
+        pushToast({ tone: 'error', title: 'Risk load failed', message });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, session.orgId, tab, pushToast]);
+
+  useEffect(() => {
     if (!selectedRun?.id) {
       setFindings([]);
       setTasks([]);
@@ -197,6 +256,48 @@ export default function ProjectDetailPage() {
       setError(message);
     });
   }, [selectedRun?.id, projectId]);
+
+  useEffect(() => {
+    if (!riskData) {
+      return;
+    }
+    if (!riskRelationSourceId && riskData.assets[0]) {
+      setRiskRelationSourceId(riskData.assets[0].id);
+    }
+    if (!riskRelationTargetId && riskData.assets[1]) {
+      setRiskRelationTargetId(riskData.assets[1].id);
+    } else if (!riskRelationTargetId && riskData.assets[0]) {
+      setRiskRelationTargetId(riskData.assets[0].id);
+    }
+    if (!riskScenarioAssessmentId && riskData.assessments[0]) {
+      setRiskScenarioAssessmentId(riskData.assessments[0].id);
+    }
+    if (!riskScenarioAssetId && riskData.assets[0]) {
+      setRiskScenarioAssetId(riskData.assets[0].id);
+    }
+    if (!riskScenarioThreatId && riskData.threats[0]) {
+      setRiskScenarioThreatId(riskData.threats[0].id);
+    }
+    if (!riskScenarioSafeguardId && riskData.safeguards[0]) {
+      setRiskScenarioSafeguardId(riskData.safeguards[0].id);
+    }
+  }, [
+    riskData,
+    riskRelationSourceId,
+    riskRelationTargetId,
+    riskScenarioAssessmentId,
+    riskScenarioAssetId,
+    riskScenarioThreatId,
+    riskScenarioSafeguardId,
+  ]);
+
+  useEffect(() => {
+    if (!folderUploadInputRef.current) {
+      return;
+    }
+    folderUploadInputRef.current.setAttribute('webkitdirectory', '');
+    folderUploadInputRef.current.setAttribute('directory', '');
+  }, []);
 
   async function runAudit() {
     setBusyRun(true);
@@ -264,32 +365,63 @@ export default function ProjectDetailPage() {
 
   async function uploadEvidence(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!uploadFile) {
-      setError('Select a file before uploading.');
+    if (uploadFiles.length === 0) {
+      setError('Select one or more files before uploading.');
       return;
     }
-    if (plan && uploadFile.size > plan.max_upload_bytes) {
-      const mb = Math.floor(plan.max_upload_bytes / 1024 / 1024);
-      setError(`File exceeds upload limit (${mb} MB).`);
-      return;
+    if (plan) {
+      const oversized = uploadFiles.find((file) => file.size > plan.max_upload_bytes);
+      if (oversized) {
+        const mb = Math.floor(plan.max_upload_bytes / 1024 / 1024);
+        setError(`File ${oversized.name} exceeds upload limit (${mb} MB).`);
+        return;
+      }
     }
     setUploadBusy(true);
     setError('');
     try {
-      JSON.parse(uploadMetadata);
+      const baseMetadata = JSON.parse(uploadMetadata) as Record<string, unknown>;
+      const relativePaths = Object.fromEntries(
+        uploadFiles
+          .map((file) => {
+            const relativePath = ((file as File & { webkitRelativePath?: string }).webkitRelativePath || '').trim();
+            return relativePath ? [relativePath, relativePath] : null;
+          })
+          .filter((entry): entry is [string, string] => entry !== null),
+      );
       const formData = new FormData();
-      formData.append('file', uploadFile);
+      for (const file of uploadFiles) {
+        const relativePath = ((file as File & { webkitRelativePath?: string }).webkitRelativePath || '').trim();
+        formData.append('files', file, relativePath || file.name);
+      }
       formData.append('item_type', uploadItemType);
-      formData.append('metadata_json', uploadMetadata);
+      formData.append(
+        'metadata_json',
+        JSON.stringify(
+          Object.keys(relativePaths).length > 0
+            ? { ...baseMetadata, uploaded_from: 'directory', relative_paths: relativePaths }
+            : baseMetadata,
+        ),
+      );
       if (selectedRun?.id) {
         formData.append('audit_run_id', selectedRun.id);
       }
-      await apiJson<EvidenceItem>(`/projects/${projectId}/evidence/upload`, {
+      await apiJson<{ uploaded_count: number; items: EvidenceItem[] }>(`/projects/${projectId}/evidence/upload-batch`, {
         method: 'POST',
         body: formData,
       });
-      pushToast({ tone: 'success', title: 'Evidence uploaded' });
-      setUploadFile(null);
+      pushToast({
+        tone: 'success',
+        title: uploadFiles.length > 1 ? 'Evidence batch uploaded' : 'Evidence uploaded',
+        message: `${uploadFiles.length} file${uploadFiles.length === 1 ? '' : 's'} stored.`,
+      });
+      setUploadFiles([]);
+      if (fileUploadInputRef.current) {
+        fileUploadInputRef.current.value = '';
+      }
+      if (folderUploadInputRef.current) {
+        folderUploadInputRef.current.value = '';
+      }
       await loadEvidence(evidencePage);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Upload failed';
@@ -297,6 +429,147 @@ export default function ProjectDetailPage() {
       pushToast({ tone: 'error', title: 'Upload failed', message });
     } finally {
       setUploadBusy(false);
+    }
+  }
+
+  async function createRiskAsset(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setRiskBusy(true);
+    setError('');
+    try {
+      await apiJson(`/projects/${projectId}/risk/assets`, {
+        method: 'POST',
+        body: JSON.stringify({ name: riskAssetName, asset_type: riskAssetType }),
+      });
+      setRiskAssetName('');
+      pushToast({ tone: 'success', title: 'Risk asset created' });
+      await loadRisk();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Could not create risk asset';
+      setError(message);
+      pushToast({ tone: 'error', title: 'Risk asset error', message });
+    } finally {
+      setRiskBusy(false);
+    }
+  }
+
+  async function createRiskRelation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setRiskBusy(true);
+    setError('');
+    try {
+      await apiJson(`/projects/${projectId}/risk/asset-relations`, {
+        method: 'POST',
+        body: JSON.stringify({
+          source_asset_id: riskRelationSourceId,
+          target_asset_id: riskRelationTargetId,
+          relation_type: riskRelationType,
+        }),
+      });
+      pushToast({ tone: 'success', title: 'Risk relation created' });
+      await loadRisk();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Could not create risk relation';
+      setError(message);
+      pushToast({ tone: 'error', title: 'Risk relation error', message });
+    } finally {
+      setRiskBusy(false);
+    }
+  }
+
+  async function createRiskThreat(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setRiskBusy(true);
+    setError('');
+    try {
+      await apiJson(`/projects/${projectId}/risk/threats`, {
+        method: 'POST',
+        body: JSON.stringify({ name: riskThreatName, category: riskThreatCategory }),
+      });
+      setRiskThreatName('');
+      pushToast({ tone: 'success', title: 'Risk threat created' });
+      await loadRisk();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Could not create risk threat';
+      setError(message);
+      pushToast({ tone: 'error', title: 'Risk threat error', message });
+    } finally {
+      setRiskBusy(false);
+    }
+  }
+
+  async function createRiskSafeguard(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setRiskBusy(true);
+    setError('');
+    try {
+      await apiJson(`/projects/${projectId}/risk/safeguards`, {
+        method: 'POST',
+        body: JSON.stringify({ name: riskSafeguardName, status: riskSafeguardStatus }),
+      });
+      setRiskSafeguardName('');
+      pushToast({ tone: 'success', title: 'Risk safeguard created' });
+      await loadRisk();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Could not create risk safeguard';
+      setError(message);
+      pushToast({ tone: 'error', title: 'Risk safeguard error', message });
+    } finally {
+      setRiskBusy(false);
+    }
+  }
+
+  async function createRiskAssessment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setRiskBusy(true);
+    setError('');
+    try {
+      await apiJson(`/projects/${projectId}/risk/assessments`, {
+        method: 'POST',
+        body: JSON.stringify({ name: riskAssessmentName, methodology: 'manual-v1', status: 'draft' }),
+      });
+      setRiskAssessmentName('');
+      pushToast({ tone: 'success', title: 'Risk assessment created' });
+      await loadRisk();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Could not create risk assessment';
+      setError(message);
+      pushToast({ tone: 'error', title: 'Risk assessment error', message });
+    } finally {
+      setRiskBusy(false);
+    }
+  }
+
+  async function createRiskScenario(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setRiskBusy(true);
+    setError('');
+    try {
+      const dimensionValues = JSON.parse(riskScenarioDimensions) as Record<string, string>;
+      await apiJson(`/projects/${projectId}/risk/scenarios`, {
+        method: 'POST',
+        body: JSON.stringify({
+          assessment_id: riskScenarioAssessmentId,
+          asset_id: riskScenarioAssetId || null,
+          threat_id: riskScenarioThreatId || null,
+          safeguard_id: riskScenarioSafeguardId || null,
+          title: riskScenarioTitle,
+          likelihood: riskScenarioLikelihood,
+          impact: riskScenarioImpact,
+          risk_level: riskScenarioLevel,
+          dimension_values_json: dimensionValues,
+        }),
+      });
+      setRiskScenarioTitle('');
+      setRiskScenarioDimensions('{\n  "C": "medium"\n}');
+      pushToast({ tone: 'success', title: 'Risk scenario created' });
+      await loadRisk();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Could not create risk scenario';
+      setError(message);
+      pushToast({ tone: 'error', title: 'Risk scenario error', message });
+    } finally {
+      setRiskBusy(false);
     }
   }
 
@@ -314,6 +587,16 @@ export default function ProjectDetailPage() {
   }
 
   const latestRun = runsData.items[0] || null;
+  const latestControlPostureScore = latestRun?.control_posture_score ?? latestRun?.risk_score ?? null;
+  const riskDimensions = riskData?.dimensions || [];
+  const riskAssets = riskData?.assets || [];
+  const riskRelations = riskData?.asset_relations || [];
+  const riskThreats = riskData?.threats || [];
+  const riskSafeguards = riskData?.safeguards || [];
+  const riskAssessments = riskData?.assessments || [];
+  const riskScenarios = riskData?.scenarios || [];
+  const riskRegister = riskData?.risk_register || [];
+  const evaluatedRiskScenarios = riskRegister.filter((entry) => entry.latest_evaluation !== null).length;
 
   return (
     <section className="stack">
@@ -322,6 +605,9 @@ export default function ProjectDetailPage() {
         <div>
           <h1 className="page-title">{project?.name || 'Project'}</h1>
           <p className="page-subtitle">{project?.description || 'No description available.'}</p>
+          {project?.frameworks?.length ? (
+            <p className="hint">Scope: {project.frameworks.join(', ')}</p>
+          ) : null}
         </div>
         <div className="actions">
           <Link href="/projects" className="button button-ghost">
@@ -362,6 +648,9 @@ export default function ProjectDetailPage() {
             <button type="button" className={`tab ${tab === 'remediation' ? 'active' : ''}`} onClick={() => openTab('remediation')}>
               Remediation
             </button>
+            <button type="button" className={`tab ${tab === 'risk' ? 'active' : ''}`} onClick={() => openTab('risk')}>
+              Risk
+            </button>
             <button type="button" className={`tab ${tab === 'evidence' ? 'active' : ''}`} onClick={() => openTab('evidence')}>
               Evidence
             </button>
@@ -377,8 +666,9 @@ export default function ProjectDetailPage() {
                 <p className="kpi-value">{latestRun ? latestRun.status : 'none'}</p>
               </article>
               <article className="card">
-                <p className="card-subtitle">Latest risk score</p>
-                <p className="kpi-value">{formatRisk(latestRun?.risk_score)}</p>
+                <p className="card-subtitle">Latest control posture score</p>
+                <p className="kpi-value">{formatRisk(latestControlPostureScore)}</p>
+                <p className="hint">Execution posture from the latest audit run. Formal risk remains separate in the Risk tab.</p>
               </article>
               <article className="card">
                 <p className="card-subtitle">Evidence uploaded</p>
@@ -422,7 +712,7 @@ export default function ProjectDetailPage() {
                         <tr>
                           <th>Run ID</th>
                           <th>Status</th>
-                          <th>Risk</th>
+                          <th>Control posture score</th>
                           <th>Updated</th>
                           <th>Actions</th>
                         </tr>
@@ -434,7 +724,7 @@ export default function ProjectDetailPage() {
                             <td>
                               <StatusBadge value={run.status} />
                             </td>
-                            <td>{formatRisk(run.risk_score)}</td>
+                            <td>{formatRisk(run.control_posture_score ?? run.risk_score)}</td>
                             <td>{formatDateTime(run.updated_at)}</td>
                             <td>
                               <Link className="button button-ghost" href={`/projects/${projectId}/runs/${run.id}`}>
@@ -550,25 +840,658 @@ export default function ProjectDetailPage() {
             </div>
           )}
 
+          {tab === 'risk' && (
+            <div className="stack">
+              {riskError && <p className="error-text">{riskError}</p>}
+              {riskLoading && (
+                <div className="stack">
+                  <div className="skeleton" style={{ height: 96 }} />
+                  <div className="skeleton" style={{ height: 240 }} />
+                </div>
+              )}
+              {!riskLoading && (
+                <>
+              <div className="grid-3">
+                <article className="card">
+                  <p className="card-subtitle">Dimensions</p>
+                  <p className="kpi-value">{riskDimensions.length}</p>
+                </article>
+                <article className="card">
+                  <p className="card-subtitle">Register entries</p>
+                  <p className="kpi-value">{riskRegister.length}</p>
+                </article>
+                <article className="card">
+                  <p className="card-subtitle">Evaluated scenarios</p>
+                  <p className="kpi-value">{evaluatedRiskScenarios}</p>
+                </article>
+              </div>
+
+              <article className="card" data-testid="formal-risk-register">
+                <div className="section-head">
+                  <div>
+                    <h3 className="card-title">Formal risk register</h3>
+                    <p className="card-subtitle">
+                      Versioned evaluations, treatments and traceability. Audit runs keep control posture separate.
+                    </p>
+                  </div>
+                </div>
+                {riskRegister.length === 0 ? (
+                  <div className="empty-state">
+                    <strong>No formal risk scenarios yet.</strong>
+                    <p>Create an assessment and at least one scenario to populate the register.</p>
+                  </div>
+                ) : (
+                  <div className="table-wrap">
+                    <table className="table">
+                      <thead>
+                        <tr>
+                          <th>Scenario</th>
+                          <th>Inherent</th>
+                          <th>Residual</th>
+                          <th>Evaluations</th>
+                          <th>Treatments</th>
+                          <th>Last evaluated</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {riskRegister.map((entry) => (
+                          <tr key={entry.scenario.id}>
+                            <td>
+                              <strong>{entry.scenario.title}</strong>
+                              <p className="hint">{entry.scenario.risk_level ? `Declared level: ${entry.scenario.risk_level}` : 'Scenario declared without baseline level.'}</p>
+                            </td>
+                            <td>{entry.latest_evaluation ? entry.latest_evaluation.inherent_level : '-'}</td>
+                            <td>{entry.latest_evaluation ? entry.latest_evaluation.residual_level : '-'}</td>
+                            <td>{entry.traceability.evaluation_versions}</td>
+                            <td>
+                              {entry.traceability.treatments_total}
+                              <p className="hint">
+                                {entry.traceability.implemented_treatments} implemented / {entry.traceability.accepted_treatments} accepted
+                              </p>
+                            </td>
+                            <td>{formatDateTime(entry.traceability.last_evaluated_at)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </article>
+
+              <div className="grid-2">
+                <article className="card">
+                  <h3 className="card-title">Security dimensions</h3>
+                  <div className="table-wrap">
+                    <table className="table">
+                      <thead>
+                        <tr>
+                          <th>Code</th>
+                          <th>Name</th>
+                          <th>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {riskDimensions.map((dimension) => (
+                          <tr key={dimension.id}>
+                            <td>{dimension.code}</td>
+                            <td>{dimension.name}</td>
+                            <td>{dimension.is_active ? 'active' : 'inactive'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </article>
+
+                <article className="card">
+                  <h3 className="card-title">Assessments</h3>
+                  {riskAssessments.length === 0 ? (
+                    <div className="empty-state">
+                      <strong>No assessments yet.</strong>
+                    </div>
+                  ) : (
+                    <div className="table-wrap">
+                      <table className="table">
+                        <thead>
+                          <tr>
+                            <th>Name</th>
+                            <th>Methodology</th>
+                            <th>Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {riskAssessments.map((assessment) => (
+                            <tr key={assessment.id}>
+                              <td>{assessment.name}</td>
+                              <td>{assessment.methodology}</td>
+                              <td>{assessment.status}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                  <form className="stack" onSubmit={createRiskAssessment} style={{ marginTop: 16 }}>
+                    <div className="field">
+                      <label className="label" htmlFor="risk-assessment-name">
+                        Assessment name
+                      </label>
+                      <input
+                        id="risk-assessment-name"
+                        className="input"
+                        value={riskAssessmentName}
+                        onChange={(event) => setRiskAssessmentName(event.target.value)}
+                        disabled={!canManageRisk || riskBusy}
+                        required
+                      />
+                    </div>
+                    <button className="button button-primary" type="submit" disabled={!canManageRisk || riskBusy}>
+                      {riskBusy ? 'Saving...' : 'Create assessment'}
+                    </button>
+                  </form>
+                </article>
+
+                <article className="card">
+                  <h3 className="card-title">Assets</h3>
+                  {riskAssets.length === 0 ? (
+                    <div className="empty-state">
+                      <strong>No assets yet.</strong>
+                    </div>
+                  ) : (
+                    <div className="table-wrap">
+                      <table className="table">
+                        <thead>
+                          <tr>
+                            <th>Name</th>
+                            <th>Type</th>
+                            <th>Criticality</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {riskAssets.map((asset) => (
+                            <tr key={asset.id}>
+                              <td>{asset.name}</td>
+                              <td>{asset.asset_type}</td>
+                              <td>{asset.criticality}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                  <form className="stack" onSubmit={createRiskAsset} style={{ marginTop: 16 }}>
+                    <div className="row">
+                      <div className="field">
+                        <label className="label" htmlFor="risk-asset-name">
+                          Asset name
+                        </label>
+                        <input
+                          id="risk-asset-name"
+                          className="input"
+                          value={riskAssetName}
+                          onChange={(event) => setRiskAssetName(event.target.value)}
+                          disabled={!canManageRisk || riskBusy}
+                          required
+                        />
+                      </div>
+                      <div className="field">
+                        <label className="label" htmlFor="risk-asset-type">
+                          Type
+                        </label>
+                        <input
+                          id="risk-asset-type"
+                          className="input"
+                          value={riskAssetType}
+                          onChange={(event) => setRiskAssetType(event.target.value)}
+                          disabled={!canManageRisk || riskBusy}
+                        />
+                      </div>
+                    </div>
+                    <button className="button button-primary" type="submit" disabled={!canManageRisk || riskBusy}>
+                      {riskBusy ? 'Saving...' : 'Add asset'}
+                    </button>
+                  </form>
+                </article>
+
+                <article className="card">
+                  <h3 className="card-title">Asset relations</h3>
+                  {riskRelations.length === 0 ? (
+                    <div className="empty-state">
+                      <strong>No asset relations yet.</strong>
+                    </div>
+                  ) : (
+                    <div className="table-wrap">
+                      <table className="table">
+                        <thead>
+                          <tr>
+                            <th>Source</th>
+                            <th>Target</th>
+                            <th>Relation</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {riskRelations.map((relation) => (
+                            <tr key={relation.id}>
+                              <td>{riskAssets.find((asset) => asset.id === relation.source_asset_id)?.name || compactId(relation.source_asset_id)}</td>
+                              <td>{riskAssets.find((asset) => asset.id === relation.target_asset_id)?.name || compactId(relation.target_asset_id)}</td>
+                              <td>{relation.relation_type}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                  <form className="stack" onSubmit={createRiskRelation} style={{ marginTop: 16 }}>
+                    <div className="row">
+                      <div className="field">
+                        <label className="label" htmlFor="risk-relation-source">
+                          Source asset
+                        </label>
+                        <select
+                          id="risk-relation-source"
+                          className="select"
+                          value={riskRelationSourceId}
+                          onChange={(event) => setRiskRelationSourceId(event.target.value)}
+                          disabled={!canManageRisk || riskBusy || riskAssets.length === 0}
+                        >
+                          <option value="">Select asset</option>
+                          {riskAssets.map((asset) => (
+                            <option key={asset.id} value={asset.id}>
+                              {asset.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="field">
+                        <label className="label" htmlFor="risk-relation-target">
+                          Target asset
+                        </label>
+                        <select
+                          id="risk-relation-target"
+                          className="select"
+                          value={riskRelationTargetId}
+                          onChange={(event) => setRiskRelationTargetId(event.target.value)}
+                          disabled={!canManageRisk || riskBusy || riskAssets.length === 0}
+                        >
+                          <option value="">Select asset</option>
+                          {riskAssets.map((asset) => (
+                            <option key={asset.id} value={asset.id}>
+                              {asset.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                    <div className="field">
+                      <label className="label" htmlFor="risk-relation-type">
+                        Relation type
+                      </label>
+                      <input
+                        id="risk-relation-type"
+                        className="input"
+                        value={riskRelationType}
+                        onChange={(event) => setRiskRelationType(event.target.value)}
+                        disabled={!canManageRisk || riskBusy}
+                      />
+                    </div>
+                    <button
+                      className="button button-primary"
+                      type="submit"
+                      disabled={!canManageRisk || riskBusy || !riskRelationSourceId || !riskRelationTargetId}
+                    >
+                      {riskBusy ? 'Saving...' : 'Add relation'}
+                    </button>
+                  </form>
+                </article>
+
+                <article className="card">
+                  <h3 className="card-title">Threats</h3>
+                  {riskThreats.length === 0 ? (
+                    <div className="empty-state">
+                      <strong>No threats yet.</strong>
+                    </div>
+                  ) : (
+                    <div className="table-wrap">
+                      <table className="table">
+                        <thead>
+                          <tr>
+                            <th>Name</th>
+                            <th>Category</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {riskThreats.map((threat) => (
+                            <tr key={threat.id}>
+                              <td>{threat.name}</td>
+                              <td>{threat.category}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                  <form className="stack" onSubmit={createRiskThreat} style={{ marginTop: 16 }}>
+                    <div className="row">
+                      <div className="field">
+                        <label className="label" htmlFor="risk-threat-name">
+                          Threat name
+                        </label>
+                        <input
+                          id="risk-threat-name"
+                          className="input"
+                          value={riskThreatName}
+                          onChange={(event) => setRiskThreatName(event.target.value)}
+                          disabled={!canManageRisk || riskBusy}
+                          required
+                        />
+                      </div>
+                      <div className="field">
+                        <label className="label" htmlFor="risk-threat-category">
+                          Category
+                        </label>
+                        <input
+                          id="risk-threat-category"
+                          className="input"
+                          value={riskThreatCategory}
+                          onChange={(event) => setRiskThreatCategory(event.target.value)}
+                          disabled={!canManageRisk || riskBusy}
+                        />
+                      </div>
+                    </div>
+                    <button className="button button-primary" type="submit" disabled={!canManageRisk || riskBusy}>
+                      {riskBusy ? 'Saving...' : 'Add threat'}
+                    </button>
+                  </form>
+                </article>
+
+                <article className="card">
+                  <h3 className="card-title">Safeguards</h3>
+                  {riskSafeguards.length === 0 ? (
+                    <div className="empty-state">
+                      <strong>No safeguards yet.</strong>
+                    </div>
+                  ) : (
+                    <div className="table-wrap">
+                      <table className="table">
+                        <thead>
+                          <tr>
+                            <th>Name</th>
+                            <th>Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {riskSafeguards.map((safeguard) => (
+                            <tr key={safeguard.id}>
+                              <td>{safeguard.name}</td>
+                              <td>{safeguard.status}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                  <form className="stack" onSubmit={createRiskSafeguard} style={{ marginTop: 16 }}>
+                    <div className="row">
+                      <div className="field">
+                        <label className="label" htmlFor="risk-safeguard-name">
+                          Safeguard name
+                        </label>
+                        <input
+                          id="risk-safeguard-name"
+                          className="input"
+                          value={riskSafeguardName}
+                          onChange={(event) => setRiskSafeguardName(event.target.value)}
+                          disabled={!canManageRisk || riskBusy}
+                          required
+                        />
+                      </div>
+                      <div className="field">
+                        <label className="label" htmlFor="risk-safeguard-status">
+                          Status
+                        </label>
+                        <input
+                          id="risk-safeguard-status"
+                          className="input"
+                          value={riskSafeguardStatus}
+                          onChange={(event) => setRiskSafeguardStatus(event.target.value)}
+                          disabled={!canManageRisk || riskBusy}
+                        />
+                      </div>
+                    </div>
+                    <button className="button button-primary" type="submit" disabled={!canManageRisk || riskBusy}>
+                      {riskBusy ? 'Saving...' : 'Add safeguard'}
+                    </button>
+                  </form>
+                </article>
+              </div>
+
+              <article className="card">
+                <h3 className="card-title">Scenarios</h3>
+                {riskScenarios.length === 0 ? (
+                  <div className="empty-state">
+                    <strong>No risk scenarios yet.</strong>
+                  </div>
+                ) : (
+                  <div className="table-wrap">
+                    <table className="table">
+                      <thead>
+                        <tr>
+                          <th>Title</th>
+                          <th>Assessment</th>
+                          <th>Asset</th>
+                          <th>Threat</th>
+                          <th>Level</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {riskScenarios.map((scenario) => (
+                          <tr key={scenario.id}>
+                            <td>{scenario.title}</td>
+                            <td>{riskAssessments.find((assessment) => assessment.id === scenario.assessment_id)?.name || compactId(scenario.assessment_id)}</td>
+                            <td>{riskAssets.find((asset) => asset.id === scenario.asset_id)?.name || '-'}</td>
+                            <td>{riskThreats.find((threat) => threat.id === scenario.threat_id)?.name || '-'}</td>
+                            <td>{scenario.risk_level || '-'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                <form className="stack" onSubmit={createRiskScenario} style={{ marginTop: 16 }}>
+                  <div className="row">
+                    <div className="field">
+                      <label className="label" htmlFor="risk-scenario-title">
+                        Scenario title
+                      </label>
+                      <input
+                        id="risk-scenario-title"
+                        className="input"
+                        value={riskScenarioTitle}
+                        onChange={(event) => setRiskScenarioTitle(event.target.value)}
+                        disabled={!canManageRisk || riskBusy}
+                        required
+                      />
+                    </div>
+                    <div className="field">
+                      <label className="label" htmlFor="risk-scenario-assessment">
+                        Assessment
+                      </label>
+                      <select
+                        id="risk-scenario-assessment"
+                        className="select"
+                        value={riskScenarioAssessmentId}
+                        onChange={(event) => setRiskScenarioAssessmentId(event.target.value)}
+                        disabled={!canManageRisk || riskBusy || riskAssessments.length === 0}
+                      >
+                        <option value="">Select assessment</option>
+                        {riskAssessments.map((assessment) => (
+                          <option key={assessment.id} value={assessment.id}>
+                            {assessment.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="row">
+                    <div className="field">
+                      <label className="label" htmlFor="risk-scenario-asset">
+                        Asset
+                      </label>
+                      <select
+                        id="risk-scenario-asset"
+                        className="select"
+                        value={riskScenarioAssetId}
+                        onChange={(event) => setRiskScenarioAssetId(event.target.value)}
+                        disabled={!canManageRisk || riskBusy || riskAssets.length === 0}
+                      >
+                        <option value="">Optional</option>
+                        {riskAssets.map((asset) => (
+                          <option key={asset.id} value={asset.id}>
+                            {asset.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="field">
+                      <label className="label" htmlFor="risk-scenario-threat">
+                        Threat
+                      </label>
+                      <select
+                        id="risk-scenario-threat"
+                        className="select"
+                        value={riskScenarioThreatId}
+                        onChange={(event) => setRiskScenarioThreatId(event.target.value)}
+                        disabled={!canManageRisk || riskBusy || riskThreats.length === 0}
+                      >
+                        <option value="">Optional</option>
+                        {riskThreats.map((threat) => (
+                          <option key={threat.id} value={threat.id}>
+                            {threat.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="field">
+                      <label className="label" htmlFor="risk-scenario-safeguard">
+                        Safeguard
+                      </label>
+                      <select
+                        id="risk-scenario-safeguard"
+                        className="select"
+                        value={riskScenarioSafeguardId}
+                        onChange={(event) => setRiskScenarioSafeguardId(event.target.value)}
+                        disabled={!canManageRisk || riskBusy || riskSafeguards.length === 0}
+                      >
+                        <option value="">Optional</option>
+                        {riskSafeguards.map((safeguard) => (
+                          <option key={safeguard.id} value={safeguard.id}>
+                            {safeguard.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="row">
+                    <div className="field">
+                      <label className="label" htmlFor="risk-scenario-likelihood">
+                        Likelihood
+                      </label>
+                      <input
+                        id="risk-scenario-likelihood"
+                        className="input"
+                        value={riskScenarioLikelihood}
+                        onChange={(event) => setRiskScenarioLikelihood(event.target.value)}
+                        disabled={!canManageRisk || riskBusy}
+                      />
+                    </div>
+                    <div className="field">
+                      <label className="label" htmlFor="risk-scenario-impact">
+                        Impact
+                      </label>
+                      <input
+                        id="risk-scenario-impact"
+                        className="input"
+                        value={riskScenarioImpact}
+                        onChange={(event) => setRiskScenarioImpact(event.target.value)}
+                        disabled={!canManageRisk || riskBusy}
+                      />
+                    </div>
+                    <div className="field">
+                      <label className="label" htmlFor="risk-scenario-level">
+                        Risk level
+                      </label>
+                      <input
+                        id="risk-scenario-level"
+                        className="input"
+                        value={riskScenarioLevel}
+                        onChange={(event) => setRiskScenarioLevel(event.target.value)}
+                        disabled={!canManageRisk || riskBusy}
+                      />
+                    </div>
+                  </div>
+                  <div className="field">
+                    <label className="label" htmlFor="risk-scenario-dimensions">
+                      dimension_values_json
+                    </label>
+                    <textarea
+                      id="risk-scenario-dimensions"
+                      className="textarea"
+                      value={riskScenarioDimensions}
+                      onChange={(event) => setRiskScenarioDimensions(event.target.value)}
+                      disabled={!canManageRisk || riskBusy}
+                    />
+                  </div>
+                  <button
+                    className="button button-primary"
+                    type="submit"
+                    disabled={!canManageRisk || riskBusy || !riskScenarioAssessmentId}
+                  >
+                    {riskBusy ? 'Saving...' : 'Create scenario'}
+                  </button>
+                </form>
+              </article>
+                </>
+              )}
+            </div>
+          )}
+
           {tab === 'evidence' && (
             <div className="stack">
               <article className="card">
                 <h3 className="card-title">Manual upload</h3>
-                <p className="card-subtitle">Upload file + metadata JSON and attach it to this project.</p>
+                <p className="card-subtitle">Upload files or a folder and attach them to this project. Folder uploads preserve relative paths in metadata.</p>
                 {!canUploadEvidence && <p className="error-text">Your role cannot upload evidence.</p>}
                 <form className="stack" onSubmit={uploadEvidence}>
                   <div className="row">
                     <div className="field">
                       <label className="label" htmlFor="evidence-file">
-                        File
+                        Files
                       </label>
                       <input
                         id="evidence-file"
                         className="input"
                         type="file"
-                        onChange={(event) => setUploadFile(event.target.files?.[0] || null)}
-                        disabled={!canUploadEvidence}
+                        multiple
+                        ref={fileUploadInputRef}
+                        onChange={(event) => setUploadFiles(Array.from(event.target.files || []))}
+                        disabled={!canUploadEvidence || uploadBusy}
                       />
+                      <p className="hint">You can select multiple files here, or choose a folder below.</p>
+                    </div>
+                    <div className="field">
+                      <label className="label" htmlFor="evidence-folder">
+                        Folder
+                      </label>
+                      <input
+                        id="evidence-folder"
+                        className="input"
+                        type="file"
+                        multiple
+                        ref={folderUploadInputRef}
+                        onChange={(event) => setUploadFiles(Array.from(event.target.files || []))}
+                        disabled={!canUploadEvidence || uploadBusy}
+                      />
+                      <p className="hint">Browser support uses directory selection and uploads each file separately.</p>
                     </div>
                     <div className="field">
                       <label className="label" htmlFor="evidence-type">
@@ -579,10 +1502,31 @@ export default function ProjectDetailPage() {
                         className="input"
                         value={uploadItemType}
                         onChange={(event) => setUploadItemType(event.target.value)}
-                        disabled={!canUploadEvidence}
+                        disabled={!canUploadEvidence || uploadBusy}
                       />
                     </div>
                   </div>
+                  {uploadFiles.length > 0 && (
+                    <div className="card" style={{ boxShadow: 'none' }}>
+                      <p className="card-subtitle">Selection</p>
+                      <p className="hint">{uploadFiles.length} file{uploadFiles.length === 1 ? '' : 's'} ready for upload.</p>
+                      <div className="stack" style={{ gap: 6 }}>
+                        {uploadFiles.slice(0, 5).map((file) => {
+                          const relativePath = ((file as File & { webkitRelativePath?: string }).webkitRelativePath || '').trim();
+                          return (
+                            <p key={`${file.name}-${file.size}-${relativePath}`} className="hint" style={{ margin: 0 }}>
+                              {relativePath || file.name}
+                            </p>
+                          );
+                        })}
+                        {uploadFiles.length > 5 && (
+                          <p className="hint" style={{ margin: 0 }}>
+                            +{uploadFiles.length - 5} more files
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
                   <div className="field">
                     <label className="label" htmlFor="evidence-metadata">
                       metadata_json
@@ -592,12 +1536,12 @@ export default function ProjectDetailPage() {
                       className="textarea"
                       value={uploadMetadata}
                       onChange={(event) => setUploadMetadata(event.target.value)}
-                      disabled={!canUploadEvidence}
+                      disabled={!canUploadEvidence || uploadBusy}
                     />
                   </div>
                   <div className="actions">
                     <button className="button button-primary" type="submit" disabled={!canUploadEvidence || uploadBusy}>
-                      {uploadBusy ? 'Uploading...' : 'Upload evidence'}
+                      {uploadBusy ? 'Uploading...' : uploadFiles.length > 1 ? 'Upload evidence batch' : 'Upload evidence'}
                     </button>
                     {plan && (
                       <span className="hint">Max upload {Math.floor(plan.max_upload_bytes / 1024 / 1024)} MB</span>
@@ -629,7 +1573,12 @@ export default function ProjectDetailPage() {
                         <tbody>
                           {evidenceData.items.map((item) => (
                             <tr key={item.id}>
-                              <td>{item.name}</td>
+                              <td>
+                                <strong>{item.name}</strong>
+                                {typeof item.metadata_json.relative_path === 'string' && item.metadata_json.relative_path !== item.name && (
+                                  <p className="hint">{item.metadata_json.relative_path}</p>
+                                )}
+                              </td>
                               <td>{item.item_type}</td>
                               <td>
                                 <StatusBadge value={item.scan_status === 'clean' ? 'clean' : 'quarantined'} />

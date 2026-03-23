@@ -49,10 +49,16 @@ export async function apiFetch(path: string, init: RequestInit = {}, requireAuth
     }
   }
 
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...init,
-    headers,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
+      headers,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Network request failed';
+    throw new Error(`Network request failed. Check API reachability, CORS, and local TLS trust. Original error: ${message}`);
+  }
 
   if (!response.ok) {
     if (requireAuth && response.status === 401 && typeof window !== 'undefined') {

@@ -85,7 +85,7 @@ export default function ProjectsPage() {
       <header className="page-header">
         <div>
           <h1 className="page-title">Projects</h1>
-          <p className="page-subtitle">Audit-ready portfolio with latest run status and risk.</p>
+          <p className="page-subtitle">Audit-ready portfolio with latest run status and control posture score.</p>
         </div>
         {canCreate && (
           <Link href="/projects/new" className="button button-primary">
@@ -156,7 +156,7 @@ export default function ProjectsPage() {
                     <th>Name</th>
                     <th>Criticality</th>
                     <th>Last Audit</th>
-                    <th>Risk Score</th>
+                    <th>Control Posture Score</th>
                     <th>Updated</th>
                   </tr>
                 </thead>
@@ -173,7 +173,7 @@ export default function ProjectsPage() {
                         <StatusBadge value={entry.project.criticality} />
                       </td>
                       <td>{entry.latest_run ? <StatusBadge value={entry.latest_run.status} /> : <span className="hint">No runs</span>}</td>
-                      <td>{formatRisk(entry.latest_run?.risk_score)}</td>
+                      <td>{formatRisk(entry.latest_run?.control_posture_score ?? entry.latest_run?.risk_score)}</td>
                       <td>{formatDateTime(entry.latest_run?.updated_at || entry.project.created_at)}</td>
                     </tr>
                   ))}

@@ -75,7 +75,7 @@ export default function AuditRunsPage() {
                   <tr>
                     <th>Project</th>
                     <th>Status</th>
-                    <th>Risk</th>
+                    <th>Control posture score</th>
                     <th>Updated</th>
                     <th>Actions</th>
                   </tr>
@@ -85,7 +85,7 @@ export default function AuditRunsPage() {
                     <tr key={item.run.id}>
                       <td>{item.project.name}</td>
                       <td><StatusBadge value={item.run.status} /></td>
-                      <td>{formatRisk(item.run.risk_score)}</td>
+                      <td>{formatRisk(item.run.control_posture_score ?? item.run.risk_score)}</td>
                       <td>{formatDateTime(item.run.updated_at)}</td>
                       <td>
                         <Link href={`/projects/${item.project.id}/runs/${item.run.id}`} className="button button-ghost">

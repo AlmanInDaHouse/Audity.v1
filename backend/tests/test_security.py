@@ -31,14 +31,19 @@ def test_upload_rejects_disallowed_mime(client, seeded_ids):
 
 
 def test_upload_rejects_file_too_large(client, seeded_ids):
+    previous_limit = main_module.settings.upload_default_max_mb
+    main_module.settings.upload_default_max_mb = 1
     token = _login(client, seeded_ids['users']['auditor'], seeded_ids['org_id'])
-    too_large = b'a' * (20 * 1024 * 1024 + 1)
-    response = client.post(
-        f"/projects/{seeded_ids['project_id']}/evidence/upload",
-        data={'item_type': 'manual_upload', 'metadata_json': '{}'},
-        files={'file': ('large.txt', too_large, 'text/plain')},
-        headers={'Authorization': f'Bearer {token}'},
-    )
+    too_large = b'a' * (1024 * 1024 + 1)
+    try:
+        response = client.post(
+            f"/projects/{seeded_ids['project_id']}/evidence/upload",
+            data={'item_type': 'manual_upload', 'metadata_json': '{}'},
+            files={'file': ('large.txt', too_large, 'text/plain')},
+            headers={'Authorization': f'Bearer {token}'},
+        )
+    finally:
+        main_module.settings.upload_default_max_mb = previous_limit
     assert response.status_code == 413
 
 
@@ -119,6 +124,28 @@ def test_sensitive_rate_limit_applies_to_evidence_upload(client, seeded_ids):
 
     assert first.status_code == 200
     assert second.status_code == 429
+
+
+def test_evidence_batch_upload_accepts_directory_like_payload(client, seeded_ids):
+    token = _login(client, seeded_ids['users']['auditor'], seeded_ids['org_id'])
+    response = client.post(
+        f"/projects/{seeded_ids['project_id']}/evidence/upload-batch",
+        data={
+            'item_type': 'manual_upload',
+            'metadata_json': '{"source":"manual","uploaded_from":"directory","relative_paths":{"policies/access.txt":"policies/access.txt","policies/sub/process.txt":"policies/sub/process.txt"}}',
+        },
+        files=[
+            ('files', ('policies/access.txt', b'access policy', 'text/plain')),
+            ('files', ('policies/sub/process.txt', b'process doc', 'text/plain')),
+        ],
+        headers={'Authorization': f'Bearer {token}'},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload['uploaded_count'] == 2
+    assert payload['items'][0]['metadata_json']['relative_path'] == 'policies/access.txt'
+    assert payload['items'][1]['metadata_json']['relative_path'] == 'policies/sub/process.txt'
 
 
 def test_mock_login_disabled_outside_allowed_env(client, seeded_ids, monkeypatch):

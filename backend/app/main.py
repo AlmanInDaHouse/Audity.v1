@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -12,8 +14,15 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit_log import append_audit_log
+from app.catalog_engine import (
+    build_catalog_bundle,
+    build_catalog_snapshot_from_bundle,
+    default_framework_scope,
+    validate_catalog_bundle,
+)
 from app.auth_sessions import issue_session
 from app.av_scanner import scan_upload_activity
+from app.api.routers.risk import router as risk_router
 from app.config import get_settings, validate_runtime_security
 from app.db import Base, engine, get_db
 from app.deps import UserContext, get_current_user, require_mfa, require_roles
@@ -22,6 +31,7 @@ from app.models import (
     AuditLogEntry,
     AuditRun,
     AuditStatusEnum,
+    CatalogVersion,
     ControlCatalog,
     EvidenceItem,
     Finding,
@@ -36,12 +46,16 @@ from app.models import (
     RoleEnum,
     SeverityEnum,
     User,
+    DEFAULT_MAX_UPLOAD_BYTES,
 )
 from app.otel import setup_otel
 from app.permissions import require_permission
 from app.rate_limit import enforce_sensitive_limit, rate_limit_middleware, rate_limiter
+from app.risk.models import RISK_TABLE_NAMES
+from app.risk.service import ensure_default_dimension_profiles
 from app.schemas import (
     AuditRunCreate,
+    CatalogVersionCreate,
     ControlCatalogCreate,
     IntegrationCreate,
     IntegrationUpdate,
@@ -67,6 +81,15 @@ ALLOWED_UPLOAD_MIME_TYPES = {
     'image/png',
     'image/jpeg',
 }
+
+
+def _bootstrap_schema_without_risk(sync_conn) -> None:
+    bootstrap_tables = [table for table in Base.metadata.sorted_tables if table.name not in RISK_TABLE_NAMES]
+    Base.metadata.create_all(sync_conn, tables=bootstrap_tables)
+
+
+def _bootstrap_schema_table_names() -> list[str]:
+    return [table.name for table in Base.metadata.sorted_tables if table.name not in RISK_TABLE_NAMES]
 
 app = FastAPI(title='Audity API', version='0.1.0')
 _cors_origins = [o.strip() for o in settings.cors_allowed_origins.split(',') if o.strip()]
@@ -101,7 +124,8 @@ async def startup() -> None:
     await store.ensure_bucket()
     if settings.auto_create_schema:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            # why this: risk tables are migration-owned to avoid precreating them before Alembic upgrades.
+            await conn.run_sync(_bootstrap_schema_without_risk)
 
 
 @app.on_event('shutdown')
@@ -110,6 +134,7 @@ async def shutdown() -> None:
 
 
 app.include_router(enterprise_router)
+app.include_router(risk_router)
 
 
 @app.get('/health')
@@ -143,11 +168,27 @@ async def jwks() -> dict[str, Any]:
 
 
 @app.get('/auth/config')
-async def auth_config() -> dict[str, Any]:
+async def auth_config(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    demo_org_id = settings.demo_org_id
+    if demo_org_id:
+        configured_org = await db.get(Organization, demo_org_id)
+        if configured_org is None:
+            demo_org_id = ''
+    if not demo_org_id:
+        demo_org = await db.scalar(select(Organization).where(Organization.name == 'Demo Org'))
+        if demo_org is not None:
+            demo_org_id = demo_org.id
+    if not demo_org_id:
+        demo_org_id = await db.scalar(
+            select(Membership.org_id)
+            .join(User, User.id == Membership.user_id)
+            .where(User.email == 'admin@demo.local')
+            .limit(1)
+        ) or ''
     return {
         'mock_login_enabled': settings.is_mock_login_enabled,
         'enterprise_auth_enabled': settings.feature_auth_enterprise,
-        'demo_org_id': settings.demo_org_id,
+        'demo_org_id': demo_org_id,
     }
 
 
@@ -196,6 +237,7 @@ def _project_to_dict(item: Project) -> dict[str, Any]:
         'name': item.name,
         'description': item.description,
         'criticality': item.criticality.value,
+        'frameworks': item.frameworks_json or default_framework_scope(),
         'created_at': item.created_at.isoformat(),
     }
 
@@ -223,6 +265,129 @@ def _contains_plaintext_secret(config_json: dict[str, Any]) -> bool:
     return False
 
 
+async def _resolve_evidence_upload_limits(db: AsyncSession, org_id: str) -> tuple[int, OrgSecurityPolicy | None]:
+    policy = await db.get(OrgSecurityPolicy, org_id)
+    plan = await db.get(PricingPlan, org_id)
+    max_size = settings.upload_default_max_mb * 1024 * 1024
+    if policy is not None:
+        max_size = min(max_size, policy.max_upload_bytes)
+    if plan is not None:
+        max_size = min(max_size, plan.max_upload_bytes)
+    return max_size, policy
+
+
+def _evidence_to_dict(evidence: EvidenceItem) -> dict[str, Any]:
+    return {
+        'id': evidence.id,
+        'org_id': evidence.org_id,
+        'project_id': evidence.project_id,
+        'audit_run_id': evidence.audit_run_id,
+        'integration_id': evidence.integration_id,
+        'item_type': evidence.item_type,
+        'name': evidence.name,
+        'object_key': evidence.object_key,
+        'sha256': evidence.sha256,
+        'scan_status': evidence.scan_status,
+        'quarantine_reason': evidence.quarantine_reason,
+        'metadata_json': evidence.metadata_json,
+        'signature_bundle_json': evidence.signature_bundle_json,
+        'created_at': evidence.created_at.isoformat(),
+    }
+
+
+async def _store_uploaded_evidence(
+    db: AsyncSession,
+    *,
+    org_id: str,
+    user_id: str,
+    project_id: str,
+    upload: UploadFile,
+    item_type: str,
+    metadata: dict[str, Any],
+    audit_run_id: str | None,
+    policy: OrgSecurityPolicy | None,
+    max_size: int,
+) -> EvidenceItem:
+    content_type = (upload.content_type or 'application/octet-stream').split(';', 1)[0].strip().lower()
+    if content_type not in ALLOWED_UPLOAD_MIME_TYPES:
+        raise HTTPException(status_code=415, detail='Unsupported media type')
+
+    staged_fd, staged_path = tempfile.mkstemp(prefix='audity-upload-')
+    os.close(staged_fd)
+    try:
+        await upload.seek(0)
+        upload_size = 0
+        with open(staged_path, 'w+b') as staged_upload:
+            while chunk := await upload.read(1024 * 1024):
+                upload_size += len(chunk)
+                if upload_size > max_size:
+                    raise HTTPException(status_code=413, detail=f'File too large (max {max_size} bytes)')
+                staged_upload.write(chunk)
+
+        if settings.feature_upload_av_scan or settings.enterprise_features_enabled:
+            with open(staged_path, 'rb') as staged_upload:
+                scan_status = await scan_upload_activity(staged_upload.read())
+        else:
+            scan_status = 'clean'
+
+        key = f'evidence/{org_id}/{project_id}/{uuid.uuid4()}-{upload.filename}'
+        store = get_object_store()
+        with open(staged_path, 'rb') as staged_upload:
+            stored = await store.put_fileobj(key, staged_upload, content_type)
+    finally:
+        if os.path.exists(staged_path):
+            os.unlink(staged_path)
+
+    quarantined = scan_status in {'infected', 'scan_error'}
+    quarantine_reason = None if not quarantined else f'av_scan_{scan_status}'
+    if quarantined:
+        UPLOAD_QUARANTINED.labels(org_id).inc()
+
+    retention_days = policy.retention_days if policy else 365
+    manifest_payload = {
+        'org_id': org_id,
+        'project_id': project_id,
+        'audit_run_id': audit_run_id,
+        'filename': upload.filename,
+        'sha256': stored.sha256,
+        'content_type': content_type,
+        'size': stored.size,
+        'uploaded_at': datetime.now(UTC).isoformat(),
+    }
+    signature_bundle = await sign_manifest(org_id, manifest_payload)
+
+    evidence = EvidenceItem(
+        org_id=org_id,
+        project_id=project_id,
+        audit_run_id=audit_run_id,
+        integration_id=None,
+        item_type=item_type,
+        name=upload.filename or 'uploaded-file',
+        object_key=stored.key,
+        sha256=stored.sha256,
+        metadata_json={**metadata, 'content_type': content_type, 'size': stored.size},
+        scan_status=scan_status,
+        quarantine_reason=quarantine_reason,
+        retention_until=datetime.now(UTC) + timedelta(days=retention_days),
+        manifest_json=manifest_payload,
+        signature_bundle_json=signature_bundle,
+        created_by_user_id=user_id,
+    )
+    db.add(evidence)
+    await db.flush()
+
+    await append_audit_log(
+        db,
+        org_id=org_id,
+        actor_user_id=user_id,
+        action='evidence.upload',
+        entity_type='evidence',
+        entity_id=evidence.id,
+        payload={'project_id': project_id, 'item_type': item_type, 'filename': evidence.name},
+    )
+    return evidence
+
+
 def _catalog_to_dict(item: ControlCatalog) -> dict[str, Any]:
     return {
         'id': item.id,
@@ -236,17 +401,41 @@ def _catalog_to_dict(item: ControlCatalog) -> dict[str, Any]:
     }
 
 
+def _catalog_version_to_dict(item: CatalogVersion) -> dict[str, Any]:
+    return {
+        'id': item.id,
+        'org_id': item.org_id,
+        'name': item.name,
+        'version': item.version,
+        'status': item.status,
+        'checksum': item.checksum,
+        'frameworks': item.frameworks_json or default_framework_scope(),
+        'created_by_user_id': item.created_by_user_id,
+        'published_at': item.published_at.isoformat() if item.published_at else None,
+        'created_at': item.created_at.isoformat(),
+    }
+
+
 def _audit_run_to_dict(item: AuditRun) -> dict[str, Any]:
+    control_posture_score = item.control_posture_score if item.control_posture_score is not None else item.risk_score
+    control_posture_level = item.control_posture_level if item.control_posture_level is not None else item.risk_level
+    risk_score = item.risk_score if item.risk_score is not None else control_posture_score
+    risk_level = item.risk_level if item.risk_level is not None else control_posture_level
     return {
         'id': item.id,
         'org_id': item.org_id,
         'project_id': item.project_id,
         'status': item.status.value,
+        'catalog_version_id': item.catalog_version_id,
         'catalog_version': item.catalog_version,
+        'frameworks_json': item.frameworks_json or default_framework_scope(),
+        'catalog_checksum': item.catalog_checksum,
         'progress_json': item.progress_json,
         'summary_json': item.summary_json,
-        'risk_score': item.risk_score,
-        'risk_level': item.risk_level,
+        'control_posture_score': control_posture_score,
+        'control_posture_level': control_posture_level,
+        'risk_score': risk_score,
+        'risk_level': risk_level,
         'report_evidence_id': item.report_evidence_id,
         'signature_bundle_json': item.signature_bundle_json,
         'created_at': item.created_at.isoformat(),
@@ -258,6 +447,33 @@ def _percentage(part: int, total: int) -> int:
     if total <= 0:
         return 0
     return round((part / total) * 100)
+
+
+def _max_projects(plan: PricingPlan | None) -> int:
+    if plan is None:
+        return 50
+    return plan.max_projects or plan.max_assets or 50
+
+
+async def _resolve_published_catalog_version(db: AsyncSession, *, org_id: str, version: str) -> CatalogVersion | None:
+    org_scoped = await db.scalar(
+        select(CatalogVersion).where(
+            CatalogVersion.org_id == org_id,
+            CatalogVersion.name == 'core-catalog',
+            CatalogVersion.version == version,
+            CatalogVersion.status == 'published',
+        )
+    )
+    if org_scoped is not None:
+        return org_scoped
+    return await db.scalar(
+        select(CatalogVersion).where(
+            CatalogVersion.org_id.is_(None),
+            CatalogVersion.name == 'core-catalog',
+            CatalogVersion.version == version,
+            CatalogVersion.status == 'published',
+        )
+    )
 
 
 async def _load_portfolio_snapshot(org_id: str, db: AsyncSession) -> dict[str, Any]:
@@ -452,7 +668,7 @@ async def _load_organization_dashboard(org_id: str, db: AsyncSession) -> dict[st
         )
     ).scalars().all()
 
-    max_assets = plan.max_assets if plan is not None else 50
+    max_projects = _max_projects(plan)
     module_flags = plan.modules_json if plan is not None else {}
     enabled_modules = sorted([key for key, enabled in module_flags.items() if enabled])
 
@@ -525,10 +741,13 @@ async def _load_organization_dashboard(org_id: str, db: AsyncSession) -> dict[st
         },
         'plan': {
             'plan_code': plan.plan_code if plan is not None else 'starter',
-            'max_assets': max_assets,
+            'max_projects': max_projects,
+            'projects_used': total_projects,
+            'project_usage_pct': _percentage(total_projects, max_projects),
+            'max_assets': max_projects,
             'assets_used': total_projects,
-            'asset_usage_pct': _percentage(total_projects, max_assets),
-            'max_upload_bytes': plan.max_upload_bytes if plan is not None else 20 * 1024 * 1024,
+            'asset_usage_pct': _percentage(total_projects, max_projects),
+            'max_upload_bytes': plan.max_upload_bytes if plan is not None else DEFAULT_MAX_UPLOAD_BYTES,
             'modules_enabled': enabled_modules,
         },
         'readiness': {
@@ -541,8 +760,10 @@ async def _load_organization_dashboard(org_id: str, db: AsyncSession) -> dict[st
                 'project_id': run.project_id,
                 'project_name': project_name,
                 'status': run.status.value,
-                'risk_score': run.risk_score,
-                'risk_level': run.risk_level,
+                'control_posture_score': run.control_posture_score if run.control_posture_score is not None else run.risk_score,
+                'control_posture_level': run.control_posture_level if run.control_posture_level is not None else run.risk_level,
+                'risk_score': run.risk_score if run.risk_score is not None else run.control_posture_score,
+                'risk_level': run.risk_level if run.risk_level is not None else run.control_posture_level,
                 'updated_at': run.updated_at.isoformat(),
             }
             for run, project_name in recent_runs
@@ -645,9 +866,11 @@ async def create_project(
         name=payload.name,
         description=payload.description,
         criticality=payload.criticality,
+        frameworks_json=payload.frameworks,
     )
     db.add(project)
     await db.flush()
+    await ensure_default_dimension_profiles(db, org_id=org_id, project_id=project.id)
     await append_audit_log(
         db,
         org_id=org_id,
@@ -655,7 +878,7 @@ async def create_project(
         action='project.create',
         entity_type='project',
         entity_id=project.id,
-        payload={'name': payload.name},
+        payload={'name': payload.name, 'frameworks': payload.frameworks},
     )
     await db.commit()
     return _project_to_dict(project)
@@ -686,6 +909,8 @@ async def update_project(
         project.description = payload.description
     if payload.criticality is not None:
         project.criticality = payload.criticality
+    if payload.frameworks is not None:
+        project.frameworks_json = payload.frameworks
 
     await append_audit_log(
         db,
@@ -900,6 +1125,118 @@ async def delete_control_catalog(
     return Response(status_code=204)
 
 
+@app.get('/catalog-versions')
+async def list_catalog_versions(
+    ctx: UserContext = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    rows = (
+        await db.execute(
+            select(CatalogVersion)
+            .where((CatalogVersion.org_id == ctx.org_id) | CatalogVersion.org_id.is_(None))
+            .order_by(CatalogVersion.created_at.desc())
+        )
+    ).scalars().all()
+    return [_catalog_version_to_dict(row) for row in rows]
+
+
+@app.post('/catalog-versions')
+async def create_catalog_version(
+    payload: CatalogVersionCreate,
+    ctx: UserContext = Depends(require_roles('org_admin', 'auditor')),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        if payload.bundle_json is None:
+            bundle = build_catalog_bundle(payload.frameworks, version=payload.version)
+        else:
+            bundle = validate_catalog_bundle(payload.bundle_json)
+            if bundle['version'] != payload.version:
+                raise HTTPException(status_code=400, detail='bundle_json version does not match payload version')
+            if bundle['frameworks'] != payload.frameworks:
+                raise HTTPException(status_code=400, detail='bundle_json frameworks do not match payload frameworks')
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    row = CatalogVersion(
+        org_id=ctx.org_id,
+        name=payload.name,
+        version=payload.version,
+        status='draft',
+        checksum=bundle['checksum'],
+        frameworks_json=bundle['frameworks'],
+        bundle_json=bundle,
+        created_by_user_id=ctx.user_id,
+    )
+    db.add(row)
+    await db.flush()
+    await append_audit_log(
+        db,
+        org_id=ctx.org_id,
+        actor_user_id=ctx.user_id,
+        action='catalog_version.create',
+        entity_type='catalog_version',
+        entity_id=row.id,
+        payload={'name': row.name, 'version': row.version, 'checksum': row.checksum},
+    )
+    await db.commit()
+    return _catalog_version_to_dict(row)
+
+
+@app.get('/catalog-versions/{catalog_version_id}')
+async def get_catalog_version(
+    catalog_version_id: str,
+    ctx: UserContext = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    row = await db.scalar(
+        select(CatalogVersion).where(
+            CatalogVersion.id == catalog_version_id,
+            (CatalogVersion.org_id == ctx.org_id) | CatalogVersion.org_id.is_(None),
+        )
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail='Catalog version not found')
+    return _catalog_version_to_dict(row)
+
+
+@app.post('/catalog-versions/{catalog_version_id}/publish')
+async def publish_catalog_version(
+    catalog_version_id: str,
+    ctx: UserContext = Depends(require_roles('org_admin')),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    row = await db.scalar(
+        select(CatalogVersion).where(
+            CatalogVersion.id == catalog_version_id,
+            CatalogVersion.org_id == ctx.org_id,
+        )
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail='Catalog version not found')
+
+    try:
+        bundle = validate_catalog_bundle(row.bundle_json)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    row.bundle_json = bundle
+    row.frameworks_json = bundle['frameworks']
+    row.checksum = bundle['checksum']
+    row.status = 'published'
+    row.published_at = datetime.now(UTC)
+    await append_audit_log(
+        db,
+        org_id=ctx.org_id,
+        actor_user_id=ctx.user_id,
+        action='catalog_version.publish',
+        entity_type='catalog_version',
+        entity_id=row.id,
+        payload={'name': row.name, 'version': row.version, 'checksum': row.checksum},
+    )
+    await db.commit()
+    return _catalog_version_to_dict(row)
+
+
 @app.post('/projects/{project_id}/audit-runs')
 async def create_audit_run(
     project_id: str,
@@ -911,13 +1248,24 @@ async def create_audit_run(
     await enforce_sensitive_limit(request, org_id=ctx.org_id, user_id=ctx.user_id)
     project = await _project_for_org(db, project_id, ctx.org_id)
     await require_permission(db, org_id=ctx.org_id, role=ctx.role, resource='audit_run', action='launch', project=project)
+    catalog_version = await _resolve_published_catalog_version(db, org_id=ctx.org_id, version=payload.catalog_version)
+    if catalog_version is None:
+        raise HTTPException(status_code=400, detail=f'No published core-catalog version found for {payload.catalog_version}')
+    try:
+        catalog_snapshot = build_catalog_snapshot_from_bundle(catalog_version.bundle_json, project.frameworks_json)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     run = AuditRun(
         org_id=ctx.org_id,
         project_id=project_id,
         triggered_by_user_id=ctx.user_id,
+        catalog_version_id=catalog_version.id,
         status=AuditStatusEnum.queued,
         catalog_version=payload.catalog_version,
+        frameworks_json=catalog_snapshot['frameworks'],
+        catalog_checksum=catalog_version.checksum,
+        catalog_snapshot_json=catalog_snapshot,
         progress_json={'stage': 'queued', 'queued_at': datetime.now(UTC).isoformat()},
         summary_json={},
     )
@@ -931,7 +1279,13 @@ async def create_audit_run(
         action='audit_run.create',
         entity_type='audit_run',
         entity_id=run.id,
-        payload={'project_id': project_id, 'catalog_version': payload.catalog_version},
+        payload={
+            'project_id': project_id,
+            'catalog_version_id': catalog_version.id,
+            'catalog_version': payload.catalog_version,
+            'frameworks': catalog_snapshot['frameworks'],
+            'catalog_checksum': catalog_version.checksum,
+        },
     )
     await db.commit()
 
@@ -1090,96 +1444,74 @@ async def upload_evidence(
     project = await _project_for_org(db, project_id, ctx.org_id)
     await require_permission(db, org_id=ctx.org_id, role=ctx.role, resource='evidence', action='upload', project=project)
 
-    contents = await file.read()
-    policy = await db.get(OrgSecurityPolicy, ctx.org_id)
-    plan = await db.get(PricingPlan, ctx.org_id)
-    max_size = settings.upload_default_max_mb * 1024 * 1024
-    if policy is not None:
-        max_size = min(max_size, policy.max_upload_bytes)
-    if plan is not None:
-        max_size = min(max_size, plan.max_upload_bytes)
-    if len(contents) > max_size:
-        raise HTTPException(status_code=413, detail=f'File too large (max {max_size} bytes)')
+    try:
+        metadata = json.loads(metadata_json)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail='metadata_json must be valid JSON') from exc
+    max_size, policy = await _resolve_evidence_upload_limits(db, ctx.org_id)
+    evidence = await _store_uploaded_evidence(
+        db,
+        org_id=ctx.org_id,
+        user_id=ctx.user_id,
+        project_id=project_id,
+        upload=file,
+        item_type=item_type,
+        metadata=metadata,
+        audit_run_id=audit_run_id,
+        policy=policy,
+        max_size=max_size,
+    )
+    await db.commit()
+    return _evidence_to_dict(evidence)
 
-    content_type = (file.content_type or 'application/octet-stream').split(';', 1)[0].strip().lower()
-    if content_type not in ALLOWED_UPLOAD_MIME_TYPES:
-        raise HTTPException(status_code=415, detail='Unsupported media type')
+
+@app.post('/projects/{project_id}/evidence/upload-batch')
+async def upload_evidence_batch(
+    project_id: str,
+    request: Request,
+    files: list[UploadFile] = File(...),
+    item_type: str = Form(default='manual_upload'),
+    metadata_json: str = Form(default='{}'),
+    audit_run_id: str | None = Form(default=None),
+    ctx: UserContext = Depends(require_mfa),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    await enforce_sensitive_limit(request, org_id=ctx.org_id, user_id=ctx.user_id)
+    project = await _project_for_org(db, project_id, ctx.org_id)
+    await require_permission(db, org_id=ctx.org_id, role=ctx.role, resource='evidence', action='upload', project=project)
+    if not files:
+        raise HTTPException(status_code=400, detail='At least one file is required')
 
     try:
         metadata = json.loads(metadata_json)
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail='metadata_json must be valid JSON') from exc
 
-    key = f'evidence/{ctx.org_id}/{project_id}/{uuid.uuid4()}-{file.filename}'
-    store = get_object_store()
-    stored = await store.put_bytes(key, contents, content_type)
+    max_size, policy = await _resolve_evidence_upload_limits(db, ctx.org_id)
+    items: list[EvidenceItem] = []
+    for upload in files:
+        file_metadata = metadata
+        relative_path = metadata.get('relative_paths', {}).get(upload.filename) if isinstance(metadata, dict) else None
+        if isinstance(relative_path, str) and relative_path.strip():
+            file_metadata = {**metadata, 'relative_path': relative_path}
+        evidence = await _store_uploaded_evidence(
+            db,
+            org_id=ctx.org_id,
+            user_id=ctx.user_id,
+            project_id=project_id,
+            upload=upload,
+            item_type=item_type,
+            metadata=file_metadata,
+            audit_run_id=audit_run_id,
+            policy=policy,
+            max_size=max_size,
+        )
+        items.append(evidence)
 
-    scan_status = await scan_upload_activity(contents)
-    quarantined = scan_status in {'infected', 'scan_error'}
-    quarantine_reason = None if not quarantined else f'av_scan_{scan_status}'
-    if quarantined:
-        UPLOAD_QUARANTINED.labels(ctx.org_id).inc()
-
-    retention_days = policy.retention_days if policy else 365
-    retention_until = datetime.now(UTC) + timedelta(days=retention_days)
-    manifest_payload = {
-        'org_id': ctx.org_id,
-        'project_id': project_id,
-        'audit_run_id': audit_run_id,
-        'filename': file.filename,
-        'sha256': stored.sha256,
-        'content_type': content_type,
-        'size': stored.size,
-        'uploaded_at': datetime.now(UTC).isoformat(),
-    }
-    signature_bundle = await sign_manifest(ctx.org_id, manifest_payload)
-
-    evidence = EvidenceItem(
-        org_id=ctx.org_id,
-        project_id=project_id,
-        audit_run_id=audit_run_id,
-        integration_id=None,
-        item_type=item_type,
-        name=file.filename or 'uploaded-file',
-        object_key=stored.key,
-        sha256=stored.sha256,
-        metadata_json={**metadata, 'content_type': content_type, 'size': stored.size},
-        scan_status=scan_status,
-        quarantine_reason=quarantine_reason,
-        retention_until=retention_until,
-        manifest_json=manifest_payload,
-        signature_bundle_json=signature_bundle,
-        created_by_user_id=ctx.user_id,
-    )
-    db.add(evidence)
-    await db.flush()
-
-    await append_audit_log(
-        db,
-        org_id=ctx.org_id,
-        actor_user_id=ctx.user_id,
-        action='evidence.upload',
-        entity_type='evidence',
-        entity_id=evidence.id,
-        payload={'project_id': project_id, 'item_type': item_type, 'filename': evidence.name},
-    )
     await db.commit()
-
     return {
-        'id': evidence.id,
-        'org_id': evidence.org_id,
-        'project_id': evidence.project_id,
-        'audit_run_id': evidence.audit_run_id,
-        'integration_id': evidence.integration_id,
-        'item_type': evidence.item_type,
-        'name': evidence.name,
-        'object_key': evidence.object_key,
-        'sha256': evidence.sha256,
-        'scan_status': evidence.scan_status,
-        'quarantine_reason': evidence.quarantine_reason,
-        'metadata_json': evidence.metadata_json,
-        'signature_bundle_json': evidence.signature_bundle_json,
-        'created_at': evidence.created_at.isoformat(),
+        'uploaded_count': len(items),
+        'items': [_evidence_to_dict(item) for item in items],
     }
 
 

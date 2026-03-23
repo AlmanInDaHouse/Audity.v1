@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from sqlalchemy import select
 
-from app.catalog_engine import compute_catalog_checksum
+from app.catalog_engine import build_catalog_bundle, compute_catalog_checksum, default_framework_scope
 from app.db import SessionLocal
 from app.models import (
+    CatalogVersion,
     ControlCatalog,
     CriticalityEnum,
     Membership,
@@ -51,6 +54,31 @@ async def _ensure_global_catalog(db, checksum: str, name: str, framework: str, s
                 checksum=checksum,
                 source_path=source_path,
                 is_global=True,
+            )
+        )
+
+
+async def _ensure_global_catalog_version(db) -> None:
+    existing = await db.scalar(
+        select(CatalogVersion).where(
+            CatalogVersion.org_id.is_(None),
+            CatalogVersion.name == 'core-catalog',
+            CatalogVersion.version == 'v1',
+        )
+    )
+    if existing is None:
+        bundle = build_catalog_bundle(default_framework_scope(), version='v1')
+        db.add(
+            CatalogVersion(
+                org_id=None,
+                name='core-catalog',
+                version='v1',
+                status='published',
+                checksum=bundle['checksum'],
+                frameworks_json=bundle['frameworks'],
+                bundle_json=bundle,
+                created_by_user_id=None,
+                published_at=datetime.now(UTC),
             )
         )
 
@@ -111,6 +139,7 @@ async def seed() -> None:
             framework='RGPD',
             source_path='/catalogs/rgpd_checklist.v1.yml',
         )
+        await _ensure_global_catalog_version(db)
 
         await db.commit()
         print('Seed complete (idempotent)')

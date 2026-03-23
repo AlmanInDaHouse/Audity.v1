@@ -53,7 +53,7 @@ export default function NewProjectPage() {
     try {
       const payload = await apiJson<Project>(`/organizations/${session.orgId}/projects`, {
         method: 'POST',
-        body: JSON.stringify({ name, description, criticality }),
+        body: JSON.stringify({ name, description, criticality, frameworks }),
       });
       pushToast({
         tone: 'success',
@@ -136,7 +136,7 @@ export default function NewProjectPage() {
 
         {step === 2 && (
           <div className="stack">
-            <p className="hint">Framework selection for audit scope. Stored in run context for this MVP.</p>
+            <p className="hint">Framework selection for audit scope. Persisted at project level and frozen in each run.</p>
             {PROJECT_FRAMEWORKS.map((framework) => (
               <label key={framework} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <input

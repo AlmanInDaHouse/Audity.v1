@@ -153,8 +153,13 @@ def test_dashboard_summary_returns_market_kpis(client, seeded_ids):
     assert payload['summary']['quarantined_evidence'] == 1
     assert payload['summary']['audit_coverage_pct'] == 100
     assert payload['plan']['plan_code'] == 'growth'
+    assert payload['plan']['max_projects'] == 4
+    assert payload['plan']['projects_used'] == 1
+    assert payload['plan']['project_usage_pct'] == 25
     assert payload['plan']['asset_usage_pct'] == 25
     assert payload['recent_runs'][0]['project_id'] == seeded_ids['project_id']
+    assert payload['recent_runs'][0]['control_posture_score'] == 72.5
+    assert payload['recent_runs'][0]['control_posture_level'] == 'high'
     assert payload['recent_activity'][0]['action'] == 'audit_run.complete'
     assert payload['legal']['dpa_status'] == 'pending'
     assert any(
