@@ -47,7 +47,14 @@ class Settings(BaseSettings):
     oidc_private_key_path: str = _default_oidc_key_path()
 
     api_base_url: str = 'http://localhost:8000'
-    cors_allowed_origins: str = 'http://localhost:3000,http://127.0.0.1:3000,https://localhost:5443,https://127.0.0.1:5443'
+    cors_allowed_origins: str = (
+        'http://localhost:3000,'
+        'http://127.0.0.1:3000,'
+        'http://localhost:53000,'
+        'http://127.0.0.1:53000,'
+        'https://localhost:5443,'
+        'https://127.0.0.1:5443'
+    )
     rate_limit_per_minute: int = Field(default=120, ge=10, le=5000)
     sensitive_rate_limit_per_minute: int = Field(default=20, ge=1, le=2000)
 

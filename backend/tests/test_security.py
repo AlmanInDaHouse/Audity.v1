@@ -192,3 +192,11 @@ def test_oidc_signer_key_persists_via_file(monkeypatch, tmp_path):
     assert first_private == second_private
     get_signer.cache_clear()
     get_settings.cache_clear()
+def test_auth_config_allows_frontend_origin(client):
+    response = client.get('/auth/config', headers={'Origin': 'http://localhost:53000'})
+
+    assert response.status_code == 200
+    assert response.headers['access-control-allow-origin'] == 'http://localhost:53000'
+    assert response.headers['access-control-allow-credentials'] == 'true'
+
+

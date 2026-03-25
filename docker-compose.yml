@@ -85,6 +85,7 @@ services:
       WORKFLOW_MODE: temporal
       OIDC_ISSUER: https://localhost:5443/api
       API_BASE_URL: https://localhost:5443/api
+      CORS_ALLOWED_ORIGINS: http://localhost:3000,http://127.0.0.1:3000,http://localhost:53000,http://127.0.0.1:53000,https://localhost:5443,https://127.0.0.1:5443
       ENTERPRISE_FEATURES_ENABLED: "false"
       FEATURE_AUTH_ENTERPRISE: "false"
       FEATURE_SCIM: "false"
